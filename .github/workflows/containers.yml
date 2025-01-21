@@ -70,12 +70,6 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Login to Docker Hub Container Registry
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKER_HUB_USERNAME }}
-          password: ${{ secrets.DOCKER_HUB_ACCESS_TOKEN }}
-
       - name: Set up Docker Buildx
         id: buildx
         uses: docker/setup-buildx-action@v3
@@ -94,7 +88,7 @@ jobs:
           file: ./Dockerfile
           push: true
           tags: |
-            ${{ secrets.DOCKER_HUB_USERNAME }}/changedetection.io:dev,ghcr.io/${{ github.repository }}:dev
+            ${{ github.actor }}/changedetection.io:dev,ghcr.io/${{ github.repository }}:dev
           platforms: linux/amd64,linux/arm64,linux/arm/v7,linux/arm/v8,linux/arm64/v8
           cache-from: type=gha
           cache-to: type=gha,mode=max
@@ -112,10 +106,8 @@ jobs:
           file: ./Dockerfile
           push: true
           tags: |
-            ${{ secrets.DOCKER_HUB_USERNAME }}/changedetection.io:${{ github.event.release.tag_name }}
-            ghcr.io/dgtlmoon/changedetection.io:${{ github.event.release.tag_name }}
-            ${{ secrets.DOCKER_HUB_USERNAME }}/changedetection.io:latest
-            ghcr.io/dgtlmoon/changedetection.io:latest
+            ghcr.io/SpiderVice/changedetection.io:${{ github.event.release.tag_name }}
+            ghcr.io/SpiderVice/changedetection.io:latest
           platforms: linux/amd64,linux/arm64,linux/arm/v7,linux/arm/v8,linux/arm64/v8
           cache-from: type=gha
           cache-to: type=gha,mode=max
