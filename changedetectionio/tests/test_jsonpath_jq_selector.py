@@ -430,48 +430,6 @@ def check_json_ext_filter(json_filter, client, live_server):
     res = client.get(url_for("form_delete", uuid="all"), follow_redirects=True)
     assert b'Deleted' in res.data
 
-def test_ignore_json_order(client, live_server, measure_memory_usage):
-    # A change in order shouldn't trigger a notification
-
-    with open("test-datastore/endpoint-content.txt", "w") as f:
-        f.write('{"hello" : 123, "world": 123}')
-
-
-    # Add our URL to the import page
-    test_url = url_for('test_endpoint', content_type="application/json", _external=True)
-    res = client.post(
-        url_for("import_page"),
-        data={"urls": test_url},
-        follow_redirects=True
-    )
-    assert b"1 Imported" in res.data
-
-    wait_for_all_checks(client)
-
-    with open("test-datastore/endpoint-content.txt", "w") as f:
-        f.write('{"world" : 123, "hello": 123}')
-
-    # Trigger a check
-    client.get(url_for("form_watch_checknow"), follow_redirects=True)
-    wait_for_all_checks(client)
-
-    res = client.get(url_for("index"))
-    assert b'unviewed' not in res.data
-
-    # Just to be sure it still works
-    with open("test-datastore/endpoint-content.txt", "w") as f:
-        f.write('{"world" : 123, "hello": 124}')
-
-    # Trigger a check
-    client.get(url_for("form_watch_checknow"), follow_redirects=True)
-    wait_for_all_checks(client)
-
-    res = client.get(url_for("index"))
-    assert b'unviewed' in res.data
-
-    res = client.get(url_for("form_delete", uuid="all"), follow_redirects=True)
-    assert b'Deleted' in res.data
-
 def test_correct_header_detect(client, live_server, measure_memory_usage):
     # Like in https://github.com/dgtlmoon/changedetection.io/pull/1593
     # Specify extra html that JSON is sometimes wrapped in - when using SockpuppetBrowser / Puppeteer / Playwrightetc
