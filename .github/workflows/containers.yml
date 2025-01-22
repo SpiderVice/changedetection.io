@@ -106,8 +106,8 @@ jobs:
           file: ./Dockerfile
           push: true
           tags: |
-            ghcr.io/SpiderVice/changedetection.io:${{ github.event.release.tag_name }}
-            ghcr.io/SpiderVice/changedetection.io:latest
+            ghcr.io/spidervice/changedetection.io:${{ github.event.release.tag_name }}
+            ghcr.io/spidervice/changedetection.io:latest
           platforms: linux/amd64,linux/arm64,linux/arm/v7,linux/arm/v8,linux/arm64/v8
           cache-from: type=gha
           cache-to: type=gha,mode=max
