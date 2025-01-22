@@ -1,7 +1,7 @@
 # HTML to TEXT/JSON DIFFERENCE self.fetcher
 
 import hashlib
-import json
+#import json
 import os
 import re
 import urllib3
@@ -133,13 +133,15 @@ class perform_site_check(difference_detection_processor):
             include_filters_rule.append("json:$")
             has_filter_rule = True
 
-        if is_json:
+        # ChangeDetection already has an option to scan for unique lines, so this feels unnecessary
+        # Also, this changes the original json far too much.
+        """if is_json:
             # Sort the JSON so we dont get false alerts when the content is just re-ordered
             try:
                 self.fetcher.content = json.dumps(json.loads(self.fetcher.content), sort_keys=True)
             except Exception as e:
                 # Might have just been a snippet, or otherwise bad JSON, continue
-                pass
+                pass"""
 
         if has_filter_rule:
             for filter in include_filters_rule:
