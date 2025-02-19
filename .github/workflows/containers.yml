@@ -14,7 +14,7 @@ on:
 
   push:
     branches:
-      - master
+      - dev
 
 jobs:
   metadata:
@@ -97,6 +97,19 @@ jobs:
 #          provenance: false
 
       # A new tagged release is required, which builds :tag and :latest
+      - name: Docker meta :tag
+        if: github.event_name == 'release' && startsWith(github.event.release.tag_name, '0.')
+        uses: docker/metadata-action@v5
+        id: meta
+        with:
+            images: |
+                ${{ secrets.DOCKER_HUB_USERNAME }}/changedetection.io
+                ghcr.io/dgtlmoon/changedetection.io
+            tags: |
+                type=semver,pattern={{version}}
+                type=semver,pattern={{major}}.{{minor}}
+                type=semver,pattern={{major}}
+
       - name: Build and push :tag
         id: docker_build_tag_release
         if: github.event_name == 'release' && startsWith(github.event.release.tag_name, '0.')
