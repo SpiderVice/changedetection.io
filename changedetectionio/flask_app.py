@@ -444,38 +444,38 @@ def changedetection_app(config=None, datastore_o=None):
     threading.Thread(target=notification_runner).start()
 
     # Check for new release version, but not when running in test/build or pytest
-    if not os.getenv("GITHUB_REF", False) and not strtobool(os.getenv('DISABLE_VERSION_CHECK', 'no')):
-        threading.Thread(target=check_for_new_version).start()
+    #if not os.getenv("GITHUB_REF", False) and not strtobool(os.getenv('DISABLE_VERSION_CHECK', 'no')):
+    #    threading.Thread(target=check_for_new_version).start()
 
     return app
 
 
 # Check for new version and anonymous stats
-def check_for_new_version():
-    import requests
-    import urllib3
-    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+# def check_for_new_version():
+#     import requests
+#     import urllib3
+#     urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-    while not app.config.exit.is_set():
-        try:
-            r = requests.post("https://changedetection.io/check-ver.php",
-                              data={'version': __version__,
-                                    'app_guid': datastore.data['app_guid'],
-                                    'watch_count': len(datastore.data['watching'])
-                                    },
+#     while not app.config.exit.is_set():
+#         try:
+#             r = requests.post("https://changedetection.io/check-ver.php",
+#                               data={'version': __version__,
+#                                     'app_guid': datastore.data['app_guid'],
+#                                     'watch_count': len(datastore.data['watching'])
+#                                     },
 
-                              verify=False)
-        except:
-            pass
+#                               verify=False)
+#         except:
+#             pass
 
-        try:
-            if "new_version" in r.text:
-                app.config['NEW_VERSION_AVAILABLE'] = True
-        except:
-            pass
+#         try:
+#             if "new_version" in r.text:
+#                 app.config['NEW_VERSION_AVAILABLE'] = True
+#         except:
+#             pass
 
-        # Check daily
-        app.config.exit.wait(86400)
+#         # Check daily
+#         app.config.exit.wait(86400)
 
 
 def notification_runner():
