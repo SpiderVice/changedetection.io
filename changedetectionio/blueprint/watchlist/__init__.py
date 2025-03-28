@@ -83,7 +83,6 @@ def construct_blueprint(datastore: ChangeDetectionStore, update_q, queuedWatchMe
                                  guid=datastore.data['app_guid'],
                                  has_proxies=datastore.proxy_list,
                                  has_unviewed=datastore.has_unviewed,
-                                 hosted_sticky=os.getenv("SALTED_PASS", False) == False,
                                  now_time_server=time.time(),
                                  pagination=pagination,
                                  queued_uuids=[q_uuid.item['uuid'] for q_uuid in update_q.queue],
