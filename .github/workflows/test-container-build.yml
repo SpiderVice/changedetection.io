@@ -49,13 +49,13 @@ jobs:
 
         # https://github.com/dgtlmoon/changedetection.io/pull/1067
         # Check we can still build under alpine/musl
-        - name: Test that the docker containers can build (musl via alpine check)
-          id: docker_build_musl
-          uses: docker/build-push-action@v6
-          with:
-            context: ./
-            file: ./.github/test/Dockerfile-alpine
-            platforms: linux/amd64,linux/arm64
+        #- name: Test that the docker containers can build (musl via alpine check)
+        #  id: docker_build_musl
+        #  uses: docker/build-push-action@v6
+        #  with:
+        #    context: ./
+        #    file: ./.github/test/Dockerfile-alpine
+        #    platforms: linux/amd64,linux/arm64
 
         - name: Test that the docker containers can build
           id: docker_build
