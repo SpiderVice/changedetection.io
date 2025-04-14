@@ -254,6 +254,7 @@ class perform_site_check(difference_detection_processor):
 
         # 615 Extract text by regex
         extract_text = watch.get('extract_text', [])
+        extract_text += self.datastore.get_tag_overrides_for_watch(uuid=watch.get('uuid'), attr='extract_text')
         if len(extract_text) > 0:
             regex_matched_output = []
             for s_re in extract_text:
@@ -298,6 +299,8 @@ class perform_site_check(difference_detection_processor):
 ### CALCULATE MD5
         # If there's text to ignore
         text_to_ignore = watch.get('ignore_text', []) + self.datastore.data['settings']['application'].get('global_ignore_text', [])
+        text_to_ignore += self.datastore.get_tag_overrides_for_watch(uuid=watch.get('uuid'), attr='ignore_text')
+
         text_for_checksuming = stripped_text_from_html
         if text_to_ignore:
             text_for_checksuming = html_tools.strip_ignore_text(stripped_text_from_html, text_to_ignore)
@@ -310,8 +313,8 @@ class perform_site_check(difference_detection_processor):
 
         ############ Blocking rules, after checksum #################
         blocked = False
-
         trigger_text = watch.get('trigger_text', [])
+        trigger_text += self.datastore.get_tag_overrides_for_watch(uuid=watch.get('uuid'), attr='trigger_text')
         if len(trigger_text):
             # Assume blocked
             blocked = True
@@ -326,6 +329,7 @@ class perform_site_check(difference_detection_processor):
                 blocked = False
 
         text_should_not_be_present = watch.get('text_should_not_be_present', [])
+        text_should_not_be_present += self.datastore.get_tag_overrides_for_watch(uuid=watch.get('uuid'), attr='text_should_not_be_present')
         if len(text_should_not_be_present):
             # If anything matched, then we should block a change from happening
             result = html_tools.strip_ignore_text(content=str(stripped_text_from_html),
