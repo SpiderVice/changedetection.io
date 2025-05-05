@@ -19,20 +19,6 @@ def construct_blueprint(datastore: ChangeDetectionStore, update_q, queuedWatchMe
             if tag_uuid in watch.get('tags', []) and (tag.get('include_filters') or tag.get('subtractive_selectors')):
                 return True
 
-    def levenshtein_ratio_recent_history(watch):
-        try:
-            from Levenshtein import ratio, distance
-            k = list(watch.history.keys())
-            if len(k) >= 2:
-                a = watch.get_history_snapshot(timestamp=k[0])
-                b = watch.get_history_snapshot(timestamp=k[1])
-                distance = distance(a, b)
-                return distance
-        except Exception as e:
-            logger.warning("Unable to calc similarity", e)
-            return "Unable to calc similarity"
-        return ''
-
     @edit_blueprint.route("/edit/<string:uuid>", methods=['GET', 'POST'])
     @login_optionally_required
     # https://stackoverflow.com/questions/42984453/wtforms-populate-form-with-data-if-data-exists
@@ -247,6 +233,9 @@ def construct_blueprint(datastore: ChangeDetectionStore, update_q, queuedWatchMe
 
             # Only works reliably with Playwright
 
+            # Import the global plugin system
+            from changedetectionio.pluggy_interface import collect_ui_edit_stats_extras
+            
             template_args = {
                 'available_processors': processors.available_processors(),
                 'available_timezones': sorted(available_timezones()),
@@ -260,11 +249,11 @@ def construct_blueprint(datastore: ChangeDetectionStore, update_q, queuedWatchMe
                 'has_extra_headers_file': len(datastore.get_all_headers_in_textfile_for_watch(uuid=uuid)) > 0,
                 'has_special_tag_options': _watch_has_tag_options_set(watch=watch),
                 'jq_support': jq_support,
-                'lev_info': levenshtein_ratio_recent_history(watch),
                 'playwright_enabled': os.getenv('PLAYWRIGHT_DRIVER_URL', False),
                 'settings_application': datastore.data['settings']['application'],
                 'system_has_playwright_configured': os.getenv('PLAYWRIGHT_DRIVER_URL'),
                 'system_has_webdriver_configured': os.getenv('WEBDRIVER_URL'),
+                'ui_edit_stats_extras': collect_ui_edit_stats_extras(watch),
                 'visual_selector_data_ready': datastore.visualselector_data_is_ready(watch_uuid=uuid),
                 'timezone_default_config': datastore.data['settings']['application'].get('timezone'),
                 'using_global_webdriver_wait': not default['webdriver_delay'],
