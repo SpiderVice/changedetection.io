@@ -16,6 +16,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libssl-dev \
     libxslt-dev \
     make \
+    patch \
     zlib1g-dev
 
 RUN mkdir /install
@@ -53,6 +54,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     locales \
     # For pdftohtml
     poppler-utils \
+    # favicon type detection and other uses
+    file \
     zlib1g \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
@@ -80,6 +83,9 @@ COPY changedetection.py /app/changedetection.py
 # On production, it is effectively LOGGER_LEVEL=''.
 ARG LOGGER_LEVEL=''
 ENV LOGGER_LEVEL="$LOGGER_LEVEL"
+
+# Default
+ENV LC_ALL=en_US.UTF-8
 
 WORKDIR /app
 CMD ["python", "./changedetection.py", "-d", "/datastore"]
