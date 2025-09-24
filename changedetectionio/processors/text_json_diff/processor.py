@@ -155,12 +155,26 @@ class perform_site_check(difference_detection_processor):
             # CSS Filter, extract the HTML that matches and feed that into the existing inscriptis::get_text
             self.fetcher.content = html_tools.workarounds_for_obfuscations(self.fetcher.content)
             html_content = self.fetcher.content
+            content_type = self.fetcher.get_all_headers().get('content-type', '').lower()
+            is_attachment = 'attachment' in self.fetcher.get_all_headers().get('content-disposition', '').lower()
 
-            # If not JSON,  and if it's not text/plain..
-            if 'text/plain' in self.fetcher.get_all_headers().get('content-type', '').lower():
+            # Try to detect better mime types if its a download or not announced as HTML
+            if is_attachment or 'octet-stream' in content_type or not 'html' in content_type:
+                logger.debug(f"Got a reply that may be a download or possibly a text attachment, checking..")
+                try:
+                    import magic
+                    mime = magic.from_buffer(html_content, mime=True)
+                    logger.debug(f"Guessing mime type, original content_type '{content_type}', mime type detected '{mime}'")
+                    if mime and "/" in mime: # looks valid and is a valid mime type
+                        content_type = mime
+                except Exception as e:
+                    logger.error(f"Error getting a more precise mime type from 'magic' library ({str(e)}")
+
+            if 'text/' in content_type and not 'html' in content_type:
                 # Don't run get_text or xpath/css filters on plaintext
                 stripped_text_from_html = html_content
             else:
+                # If not JSON, and if it's not text/plain..
                 # Does it have some ld+json price data? used for easier monitoring
                 update_obj['has_ldjson_price_data'] = html_tools.has_ldjson_product_info(self.fetcher.content)
 
@@ -253,8 +267,7 @@ class perform_site_check(difference_detection_processor):
         update_obj["last_check_status"] = self.fetcher.get_last_status_code()
 
         # 615 Extract text by regex
-        extract_text = watch.get('extract_text', [])
-        extract_text += self.datastore.get_tag_overrides_for_watch(uuid=watch.get('uuid'), attr='extract_text')
+        extract_text = list(dict.fromkeys(watch.get('extract_text', []) + self.datastore.get_tag_overrides_for_watch(uuid=watch.get('uuid'), attr='extract_text')))
         if len(extract_text) > 0:
             regex_matched_output = []
             for s_re in extract_text:
@@ -313,8 +326,7 @@ class perform_site_check(difference_detection_processor):
 
         ############ Blocking rules, after checksum #################
         blocked = False
-        trigger_text = watch.get('trigger_text', [])
-        trigger_text += self.datastore.get_tag_overrides_for_watch(uuid=watch.get('uuid'), attr='trigger_text')
+        trigger_text = list(dict.fromkeys(watch.get('trigger_text', []) + self.datastore.get_tag_overrides_for_watch(uuid=watch.get('uuid'), attr='trigger_text')))
         if len(trigger_text):
             # Assume blocked
             blocked = True
@@ -328,8 +340,7 @@ class perform_site_check(difference_detection_processor):
             if result:
                 blocked = False
 
-        text_should_not_be_present = watch.get('text_should_not_be_present', [])
-        text_should_not_be_present += self.datastore.get_tag_overrides_for_watch(uuid=watch.get('uuid'), attr='text_should_not_be_present')
+        text_should_not_be_present = list(dict.fromkeys(watch.get('text_should_not_be_present', []) + self.datastore.get_tag_overrides_for_watch(uuid=watch.get('uuid'), attr='text_should_not_be_present')))
         if len(text_should_not_be_present):
             # If anything matched, then we should block a change from happening
             result = html_tools.strip_ignore_text(content=str(stripped_text_from_html),

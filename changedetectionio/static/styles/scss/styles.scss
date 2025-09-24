@@ -20,7 +20,7 @@
 @use "parts/lister_extra";
 @use "parts/socket";
 @use "parts/visualselector";
-
+@use "parts/widgets";
 
 body {
   color: var(--color-text);
@@ -200,24 +200,6 @@ code {
   flex-direction: column;
   display: flex;
   justify-content: center;
-}
-
-
-#post-list-buttons {
-  text-align: right;
-  padding: 0px;
-  margin: 0px;
-
-  li {
-    display: inline-block;
-  }
-
-  a {
-    border-top-left-radius: initial;
-    border-top-right-radius: initial;
-    border-bottom-left-radius: 5px;
-    border-bottom-right-radius: 5px;
-  }
 }
 
 
@@ -1130,11 +1112,12 @@ ul {
 }
 
 #realtime-conn-error {
-  position: absolute;
+  position: fixed;
   bottom: 0;
-  left: 30px;
+  left: 0;
   background: var(--color-warning);
   padding: 10px;
   font-size: 0.8rem;
   color: #fff;
+  opacity: 0.8;
 }
