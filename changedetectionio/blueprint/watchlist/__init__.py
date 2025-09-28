@@ -87,7 +87,6 @@ def construct_blueprint(datastore: ChangeDetectionStore, update_q, queuedWatchMe
             form=form,
             guid=datastore.data['app_guid'],
             has_proxies=datastore.proxy_list,
-            has_unviewed=datastore.has_unviewed,
             hosted_sticky=os.getenv("SALTED_PASS", False) == False,
             now_time_server=round(time.time()),
             pagination=pagination,
