@@ -5,13 +5,16 @@ from apprise import NotifyFormat
 from loguru import logger
 from urllib.parse import urlparse
 from .apprise_plugin.assets import apprise_asset, APPRISE_AVATAR_URL
-from .apprise_plugin.custom_handlers import SUPPORTED_HTTP_METHODS
+from .email_helpers import as_monospaced_html_email
 from ..diff import HTML_REMOVED_STYLE, REMOVED_PLACEMARKER_OPEN, REMOVED_PLACEMARKER_CLOSED, ADDED_PLACEMARKER_OPEN, HTML_ADDED_STYLE, \
     ADDED_PLACEMARKER_CLOSED, CHANGED_INTO_PLACEMARKER_OPEN, CHANGED_INTO_PLACEMARKER_CLOSED, CHANGED_PLACEMARKER_OPEN, \
-    CHANGED_PLACEMARKER_CLOSED, HTML_CHANGED_STYLE
+    CHANGED_PLACEMARKER_CLOSED, HTML_CHANGED_STYLE, HTML_CHANGED_INTO_STYLE
+import re
+
 from ..notification_service import NotificationContextData
 
-CUSTOM_LINEBREAK_PLACEHOLDER='$$BR$$'
+newline_re = re.compile(r'\r\n|\r|\n')
+
 
 def markup_text_links_to_html(body):
     """
@@ -62,13 +65,13 @@ def notification_format_align_with_apprise(n_format : str):
     :return:
     """
 
-    if n_format.lower().startswith('html'):
+    if n_format.startswith('html'):
         # Apprise only knows 'html' not 'htmlcolor' etc, which shouldnt matter here
         n_format = NotifyFormat.HTML.value
-    elif n_format.lower().startswith('markdown'):
+    elif n_format.startswith('markdown'):
         # probably the same but just to be safe
         n_format = NotifyFormat.MARKDOWN.value
-    elif n_format.lower().startswith('text'):
+    elif n_format.startswith('text'):
         # probably the same but just to be safe
         n_format = NotifyFormat.TEXT.value
     else:
@@ -76,6 +79,111 @@ def notification_format_align_with_apprise(n_format : str):
 
     return n_format
 
+def apply_discord_markdown_to_body(n_body):
+    """
+    Discord does not support <del> but it supports non-standard ~~strikethrough~~
+    :param n_body:
+    :return:
+    """
+    import re
+    # Define the mapping between your placeholders and markdown markers
+    replacements = [
+        (REMOVED_PLACEMARKER_OPEN, '~~', REMOVED_PLACEMARKER_CLOSED, '~~'),
+        (ADDED_PLACEMARKER_OPEN, '**', ADDED_PLACEMARKER_CLOSED, '**'),
+        (CHANGED_PLACEMARKER_OPEN, '~~', CHANGED_PLACEMARKER_CLOSED, '~~'),
+        (CHANGED_INTO_PLACEMARKER_OPEN, '**', CHANGED_INTO_PLACEMARKER_CLOSED, '**'),
+    ]
+    # So that the markdown gets added without any whitespace following it which would break it
+    for open_tag, open_md, close_tag, close_md in replacements:
+        # Regex: match opening tag, optional whitespace, capture the content, optional whitespace, then closing tag
+        pattern = re.compile(
+            re.escape(open_tag) + r'(\s*)(.*?)?(\s*)' + re.escape(close_tag),
+            flags=re.DOTALL
+        )
+        n_body = pattern.sub(lambda m: f"{m.group(1)}{open_md}{m.group(2)}{close_md}{m.group(3)}", n_body)
+    return n_body
+
+def apply_standard_markdown_to_body(n_body):
+    """
+    Apprise does not support ~~strikethrough~~ but it will convert <del> to HTML strikethrough.
+    :param n_body:
+    :return:
+    """
+    import re
+    # Define the mapping between your placeholders and markdown markers
+    replacements = [
+        (REMOVED_PLACEMARKER_OPEN, '<del>', REMOVED_PLACEMARKER_CLOSED, '</del>'),
+        (ADDED_PLACEMARKER_OPEN, '**', ADDED_PLACEMARKER_CLOSED, '**'),
+        (CHANGED_PLACEMARKER_OPEN, '<del>', CHANGED_PLACEMARKER_CLOSED, '</del>'),
+        (CHANGED_INTO_PLACEMARKER_OPEN, '**', CHANGED_INTO_PLACEMARKER_CLOSED, '**'),
+    ]
+
+    # So that the markdown gets added without any whitespace following it which would break it
+    for open_tag, open_md, close_tag, close_md in replacements:
+        # Regex: match opening tag, optional whitespace, capture the content, optional whitespace, then closing tag
+        pattern = re.compile(
+            re.escape(open_tag) + r'(\s*)(.*?)?(\s*)' + re.escape(close_tag),
+            flags=re.DOTALL
+        )
+        n_body = pattern.sub(lambda m: f"{m.group(1)}{open_md}{m.group(2)}{close_md}{m.group(3)}", n_body)
+    return n_body
+
+
+def replace_placemarkers_in_text(text, url, requested_output_format):
+    """
+    Replace diff placemarkers in text based on the URL service type and requested output format.
+    Used for both notification title and body to ensure consistent placeholder replacement.
+
+    :param text: The text to process
+    :param url: The notification URL (to detect service type)
+    :param requested_output_format: The output format (html, htmlcolor, markdown, text, etc.)
+    :return: Processed text with placemarkers replaced
+    """
+    if not text:
+        return text
+
+    if url.startswith('tgram://'):
+        # Telegram only supports a limited subset of HTML
+        # Use strikethrough for removed content, bold for added content
+        text = text.replace(REMOVED_PLACEMARKER_OPEN, '<s>')
+        text = text.replace(REMOVED_PLACEMARKER_CLOSED, '</s>')
+        text = text.replace(ADDED_PLACEMARKER_OPEN, '<b>')
+        text = text.replace(ADDED_PLACEMARKER_CLOSED, '</b>')
+        # Handle changed/replaced lines (old → new)
+        text = text.replace(CHANGED_PLACEMARKER_OPEN, '<s>')
+        text = text.replace(CHANGED_PLACEMARKER_CLOSED, '</s>')
+        text = text.replace(CHANGED_INTO_PLACEMARKER_OPEN, '<b>')
+        text = text.replace(CHANGED_INTO_PLACEMARKER_CLOSED, '</b>')
+    elif (url.startswith('discord://') or url.startswith('https://discordapp.com/api/webhooks')
+          or url.startswith('https://discord.com/api')) and requested_output_format == 'html':
+        # Discord doesn't support HTML, use Discord markdown
+        text = apply_discord_markdown_to_body(n_body=text)
+    elif requested_output_format == 'htmlcolor':
+        # https://github.com/dgtlmoon/changedetection.io/issues/821#issuecomment-1241837050
+        text = text.replace(REMOVED_PLACEMARKER_OPEN, f'<span style="{HTML_REMOVED_STYLE}" role="deletion" aria-label="Removed text" title="Removed text">')
+        text = text.replace(REMOVED_PLACEMARKER_CLOSED, f'</span>')
+        text = text.replace(ADDED_PLACEMARKER_OPEN, f'<span style="{HTML_ADDED_STYLE}" role="insertion" aria-label="Added text" title="Added text">')
+        text = text.replace(ADDED_PLACEMARKER_CLOSED, f'</span>')
+        # Handle changed/replaced lines (old → new)
+        text = text.replace(CHANGED_PLACEMARKER_OPEN, f'<span style="{HTML_CHANGED_STYLE}" role="note" aria-label="Changed text" title="Changed text">')
+        text = text.replace(CHANGED_PLACEMARKER_CLOSED, f'</span>')
+        text = text.replace(CHANGED_INTO_PLACEMARKER_OPEN, f'<span style="{HTML_CHANGED_INTO_STYLE}" role="note" aria-label="Changed into" title="Changed into">')
+        text = text.replace(CHANGED_INTO_PLACEMARKER_CLOSED, f'</span>')
+    elif requested_output_format == 'markdown':
+        # Markdown to HTML - Apprise will convert this to HTML
+        text = apply_standard_markdown_to_body(n_body=text)
+    else:
+        # plaintext, html, and default - use simple text markers
+        text = text.replace(REMOVED_PLACEMARKER_OPEN, '(removed) ')
+        text = text.replace(REMOVED_PLACEMARKER_CLOSED, '')
+        text = text.replace(ADDED_PLACEMARKER_OPEN, '(added) ')
+        text = text.replace(ADDED_PLACEMARKER_CLOSED, '')
+        text = text.replace(CHANGED_PLACEMARKER_OPEN, f'(changed) ')
+        text = text.replace(CHANGED_PLACEMARKER_CLOSED, f'')
+        text = text.replace(CHANGED_INTO_PLACEMARKER_OPEN, f'(into) ')
+        text = text.replace(CHANGED_INTO_PLACEMARKER_CLOSED, f'')
+
+    return text
 
 def apply_service_tweaks(url, n_body, n_title, requested_output_format):
 
@@ -88,6 +196,12 @@ def apply_service_tweaks(url, n_body, n_title, requested_output_format):
     if not n_body or not n_body.strip():
         return url, n_body, n_title
 
+    # Normalize URL scheme to lowercase to prevent case-sensitivity issues
+    # e.g., "Discord://webhook" -> "discord://webhook", "TGRAM://bot123" -> "tgram://bot123"
+    scheme_separator_pos = url.find('://')
+    if scheme_separator_pos > 0:
+        url = url[:scheme_separator_pos].lower() + url[scheme_separator_pos:]
+
     # So if no avatar_url is specified, add one so it can be correctly calculated into the total payload
     parsed = urlparse(url)
     k = '?' if not parsed.query else '&'
@@ -99,23 +213,22 @@ def apply_service_tweaks(url, n_body, n_title, requested_output_format):
             and not url.startswith('put'):
         url += k + f"avatar_url={APPRISE_AVATAR_URL}"
 
+    # Replace placemarkers in title first (this was the missing piece causing the bug)
+    # Titles are ALWAYS plain text across all notification services (Discord embeds, Slack attachments,
+    # email Subject headers, etc.), so we always use 'text' format for title placemarker replacement
+    # Looking over apprise library it seems that all plugins only expect plain-text.
+    n_title = replace_placemarkers_in_text(n_title, url, 'text')
+
     if url.startswith('tgram://'):
         # Telegram only supports a limit subset of HTML, remove the '<br>' we place in.
         # re https://github.com/dgtlmoon/changedetection.io/issues/555
         # @todo re-use an existing library we have already imported to strip all non-allowed tags
         n_body = n_body.replace('<br>', '\n')
         n_body = n_body.replace('</br>', '\n')
+        n_body = newline_re.sub('\n', n_body)
 
-        # Use strikethrough for removed content, bold for added content
-        n_body = n_body.replace(REMOVED_PLACEMARKER_OPEN, '<s>')
-        n_body = n_body.replace(REMOVED_PLACEMARKER_CLOSED, '</s>')
-        n_body = n_body.replace(ADDED_PLACEMARKER_OPEN, '<b>')
-        n_body = n_body.replace(ADDED_PLACEMARKER_CLOSED, '</b>')
-        # Handle changed/replaced lines (old → new)
-        n_body = n_body.replace(CHANGED_PLACEMARKER_OPEN, '<s>')
-        n_body = n_body.replace(CHANGED_PLACEMARKER_CLOSED, '</s>')
-        n_body = n_body.replace(CHANGED_INTO_PLACEMARKER_OPEN, '<b>')
-        n_body = n_body.replace(CHANGED_INTO_PLACEMARKER_CLOSED, '</b>')
+        # Replace placemarkers for body
+        n_body = replace_placemarkers_in_text(n_body, url, requested_output_format)
 
         # real limit is 4096, but minus some for extra metadata
         payload_max_size = 3600
@@ -129,6 +242,7 @@ def apply_service_tweaks(url, n_body, n_title, requested_output_format):
         # Discord doesn't support HTML, replace <br> with newlines
         n_body = n_body.strip().replace('<br>', '\n')
         n_body = n_body.replace('</br>', '\n')
+        n_body = newline_re.sub('\n', n_body)
 
         # Don't replace placeholders or truncate here - let the custom Discord plugin handle it
         # The plugin will use embeds (6000 char limit across all embeds) if placeholders are present,
@@ -138,15 +252,7 @@ def apply_service_tweaks(url, n_body, n_title, requested_output_format):
         if requested_output_format == 'html':
             # No diff placeholders, use Discord markdown for any other formatting
             # Use Discord markdown: strikethrough for removed, bold for added
-            n_body = n_body.replace(REMOVED_PLACEMARKER_OPEN, '~~')
-            n_body = n_body.replace(REMOVED_PLACEMARKER_CLOSED, '~~')
-            n_body = n_body.replace(ADDED_PLACEMARKER_OPEN, '**')
-            n_body = n_body.replace(ADDED_PLACEMARKER_CLOSED, '**')
-            # Handle changed/replaced lines (old → new)
-            n_body = n_body.replace(CHANGED_PLACEMARKER_OPEN, '~~')
-            n_body = n_body.replace(CHANGED_PLACEMARKER_CLOSED, '~~')
-            n_body = n_body.replace(CHANGED_INTO_PLACEMARKER_OPEN, '**')
-            n_body = n_body.replace(CHANGED_INTO_PLACEMARKER_CLOSED, '**')
+            n_body = replace_placemarkers_in_text(n_body, url, requested_output_format)
 
             # Apply 2000 char limit for plain content
             payload_max_size = 1700
@@ -157,57 +263,28 @@ def apply_service_tweaks(url, n_body, n_title, requested_output_format):
 
     # Is not discord/tgram and they want htmlcolor
     elif requested_output_format == 'htmlcolor':
-        # https://github.com/dgtlmoon/changedetection.io/issues/821#issuecomment-1241837050
-        n_body = n_body.replace(REMOVED_PLACEMARKER_OPEN, f'<span style="{HTML_REMOVED_STYLE}" role="deletion" aria-label="Removed text" title="Removed text">')
-        n_body = n_body.replace(REMOVED_PLACEMARKER_CLOSED, f'</span>')
-        n_body = n_body.replace(ADDED_PLACEMARKER_OPEN, f'<span style="{HTML_ADDED_STYLE}" role="insertion" aria-label="Added text" title="Added text">')
-        n_body = n_body.replace(ADDED_PLACEMARKER_CLOSED, f'</span>')
-        # Handle changed/replaced lines (old → new)
-        n_body = n_body.replace(CHANGED_PLACEMARKER_OPEN, f'<span style="{HTML_CHANGED_STYLE}" role="note" aria-label="Changed text" title="Changed text">')
-        n_body = n_body.replace(CHANGED_PLACEMARKER_CLOSED, f'</span>')
-        n_body = n_body.replace(CHANGED_INTO_PLACEMARKER_OPEN, f'<span style="{HTML_CHANGED_STYLE}" role="note" aria-label="Changed into" title="Changed into">')
-        n_body = n_body.replace(CHANGED_INTO_PLACEMARKER_CLOSED, f'</span>')
-        n_body = n_body.replace('\n', f'{CUSTOM_LINEBREAK_PLACEHOLDER}\n')
+        n_body = replace_placemarkers_in_text(n_body, url, requested_output_format)
+        n_body = newline_re.sub('<br>\n', n_body)
     elif requested_output_format == 'html':
-        n_body = n_body.replace(REMOVED_PLACEMARKER_OPEN, '(removed) ')
-        n_body = n_body.replace(REMOVED_PLACEMARKER_CLOSED, '')
-        n_body = n_body.replace(ADDED_PLACEMARKER_OPEN, '(added) ')
-        n_body = n_body.replace(ADDED_PLACEMARKER_CLOSED, '')
-        n_body = n_body.replace(CHANGED_PLACEMARKER_OPEN, f'(changed) ')
-        n_body = n_body.replace(CHANGED_PLACEMARKER_CLOSED, f'')
-        n_body = n_body.replace(CHANGED_INTO_PLACEMARKER_OPEN, f'(into) ')
-        n_body = n_body.replace(CHANGED_INTO_PLACEMARKER_CLOSED, f'')
-        n_body = n_body.replace('\n', f'{CUSTOM_LINEBREAK_PLACEHOLDER}\n')
+        n_body = replace_placemarkers_in_text(n_body, url, requested_output_format)
+        n_body = newline_re.sub('<br>\n', n_body)
+    elif requested_output_format == 'markdown':
+        # Markdown to HTML - Apprise will convert this to HTML
+        n_body = replace_placemarkers_in_text(n_body, url, requested_output_format)
 
     else: #plaintext etc default
-        n_body = n_body.replace(REMOVED_PLACEMARKER_OPEN, '(removed) ')
-        n_body = n_body.replace(REMOVED_PLACEMARKER_CLOSED, '')
-        n_body = n_body.replace(ADDED_PLACEMARKER_OPEN, '(added) ')
-        n_body = n_body.replace(ADDED_PLACEMARKER_CLOSED, '')
-        n_body = n_body.replace(CHANGED_PLACEMARKER_OPEN, f'(changed) ')
-        n_body = n_body.replace(CHANGED_PLACEMARKER_CLOSED, f'')
-        n_body = n_body.replace(CHANGED_INTO_PLACEMARKER_OPEN, f'(into) ')
-        n_body = n_body.replace(CHANGED_INTO_PLACEMARKER_CLOSED, f'')
+        n_body = replace_placemarkers_in_text(n_body, url, requested_output_format)
 
     return url, n_body, n_title
 
 
 def process_notification(n_object: NotificationContextData, datastore):
     from changedetectionio.jinja2_custom import render as jinja_render
-    from . import default_notification_format_for_watch, default_notification_format, valid_notification_formats
+    from . import USE_SYSTEM_DEFAULT_NOTIFICATION_FORMAT_FOR_WATCH, default_notification_format, valid_notification_formats
     # be sure its registered
     from .apprise_plugin.custom_handlers import apprise_http_custom_handler
     # Register custom Discord plugin
     from .apprise_plugin.discord import NotifyDiscordCustom
-
-    # Create list of custom handler protocols (both http and https versions)
-    custom_handler_protocols = [f"{method}://" for method in SUPPORTED_HTTP_METHODS]
-    custom_handler_protocols += [f"{method}s://" for method in SUPPORTED_HTTP_METHODS]
-
-    has_custom_handler = any(
-        url.startswith(tuple(custom_handler_protocols))
-        for url in n_object['notification_urls']
-    )
 
     if not isinstance(n_object, NotificationContextData):
         raise TypeError(f"Expected NotificationContextData, got {type(n_object)}")
@@ -219,18 +296,17 @@ def process_notification(n_object: NotificationContextData, datastore):
     # Insert variables into the notification content
     notification_parameters = create_notification_parameters(n_object, datastore)
 
-    requested_output_format = valid_notification_formats.get(
-        n_object.get('notification_format', default_notification_format),
-        valid_notification_formats[default_notification_format],
-    )
+    requested_output_format = n_object.get('notification_format', default_notification_format)
+    logger.debug(f"Requested notification output format: '{requested_output_format}'")
 
     # If we arrived with 'System default' then look it up
-    if requested_output_format == default_notification_format_for_watch and datastore.data['settings']['application'].get('notification_format') != default_notification_format_for_watch:
+    if requested_output_format == USE_SYSTEM_DEFAULT_NOTIFICATION_FORMAT_FOR_WATCH:
         # Initially text or whatever
-        requested_output_format = datastore.data['settings']['application'].get('notification_format', valid_notification_formats[default_notification_format]).lower()
+        requested_output_format = datastore.data['settings']['application'].get('notification_format', default_notification_format)
 
     requested_output_format_original = requested_output_format
 
+    # Now clean it up so it fits perfectly with apprise
     requested_output_format = notification_format_align_with_apprise(n_format=requested_output_format)
 
     logger.trace(f"Complete notification body including Jinja and placeholders calculated in  {time.time() - now:.2f}s")
@@ -258,26 +334,31 @@ def process_notification(n_object: NotificationContextData, datastore):
     with (apprise.LogCapture(level=apprise.logging.DEBUG) as logs):
         for url in n_object['notification_urls']:
 
-            # Get the notification body from datastore
             n_body = jinja_render(template_str=n_object.get('notification_body', ''), **notification_parameters)
+            n_title = jinja_render(template_str=n_object.get('notification_title', ''), **notification_parameters)
 
             if n_object.get('markup_text_links_to_html_links'):
                 n_body = markup_text_links_to_html(body=n_body)
 
-
-            n_title = jinja_render(template_str=n_object.get('notification_title', ''), **notification_parameters)
-
             url = url.strip()
-            if url.startswith('#'):
-                logger.trace(f"Skipping commented out notification URL - {url}")
+            if not url or url.startswith('#'):
+                logger.debug(f"Skipping commented out or empty notification URL - '{url}'")
                 continue
 
-            if not url:
-                logger.warning(f"Process Notification: skipping empty notification URL.")
-                continue
-
-            logger.info(f">> Process Notification: AppRise notifying {url}")
+            logger.info(f">> Process Notification: AppRise start notifying '{url}'")
             url = jinja_render(template_str=url, **notification_parameters)
+
+            # If it's a plaintext document, and they want HTML type email/alerts, so it needs to be escaped
+            watch_mime_type = n_object.get('watch_mime_type')
+            if watch_mime_type and 'text/' in watch_mime_type.lower() and not 'html' in watch_mime_type.lower():
+                if 'html' in requested_output_format:
+                    from markupsafe import escape
+                    n_body = str(escape(n_body))
+
+            if 'html' in requested_output_format:
+                # Since the n_body is always some kind of text from the 'diff' engine, attempt to preserve whitespaces that get sent to the HTML output
+                # But only where its more than 1 consecutive whitespace, otherwise "and this" becomes "and&nbsp;this" etc which is too much.
+                n_body = n_body.replace('  ', '&nbsp;&nbsp;')
 
             (url, n_body, n_title) = apply_service_tweaks(url=url, n_body=n_body, n_title=n_title, requested_output_format=requested_output_format_original)
 
@@ -296,31 +377,37 @@ def process_notification(n_object: NotificationContextData, datastore):
                     apprise_input_format = NotifyFormat.TEXT.value
 
                 elif requested_output_format == NotifyFormat.MARKDOWN.value:
-                    # This actually means we request "Markdown to HTML", we want HTML output
+                    # Convert markdown to HTML ourselves since not all plugins do this
+                    from apprise.conversion import markdown_to_html
+                    # Make sure there are paragraph breaks around horizontal rules
+                    n_body = n_body.replace('---', '\n\n---\n\n')
+                    n_body = markdown_to_html(n_body)
                     url = f"{url}{prefix_add_to_url}format={NotifyFormat.HTML.value}"
                     requested_output_format = NotifyFormat.HTML.value
-                    apprise_input_format = NotifyFormat.MARKDOWN.value
+                    apprise_input_format = NotifyFormat.HTML.value  # Changed from MARKDOWN to HTML
 
-                # If it's a plaintext document, and they want HTML type email/alerts, so it needs to be escaped
-                watch_mime_type = n_object.get('watch_mime_type', '').lower()
-                if watch_mime_type and 'text/' in watch_mime_type and not 'html' in watch_mime_type:
-                    if 'html' in requested_output_format:
-                        from markupsafe import escape
-                        n_body = str(escape(n_body))
+            else:
+                # ?format was IN the apprise URL, they are kind of on their own here, we will try our best
+                if 'format=html' in url:
+                    n_body = newline_re.sub('<br>\r\n', n_body)
+                    # This will also prevent apprise from doing conversion
+                    apprise_input_format = NotifyFormat.HTML.value
+                    requested_output_format = NotifyFormat.HTML.value
+                elif 'format=text' in url:
+                    apprise_input_format = NotifyFormat.TEXT.value
+                    requested_output_format = NotifyFormat.TEXT.value
 
-                # Could have arrived at any stage, so we dont end up running .escape on it
-                if 'html' in requested_output_format:
-                    n_body = n_body.replace(CUSTOM_LINEBREAK_PLACEHOLDER, '<br>')
-                else:
-                    # Just incase
-                    n_body = n_body.replace(CUSTOM_LINEBREAK_PLACEHOLDER, '')
-
-
-            apobj.add(url)
 
             sent_objs.append({'title': n_title,
                               'body': n_body,
                               'url': url})
+            apobj.add(url)
+
+            # Since the output is always based on the plaintext of the 'diff' engine, wrap it nicely.
+            # It should always be similar to the 'history' part of the UI.
+            if url.startswith('mail') and 'html' in requested_output_format:
+                if not '<pre' in n_body and not '<body' in n_body: # No custom HTML-ish body was setup already
+                    n_body = as_monospaced_html_email(content=n_body, title=n_title)
 
         apobj.notify(
             title=n_title,

@@ -28,10 +28,7 @@ from wtforms.utils import unset_value
 
 from wtforms.validators import ValidationError
 
-from validators.url import url as url_validator
-
 from changedetectionio.widgets import TernaryNoneBooleanField
-
 
 # default
 # each select <option data-enabled="enabled-0-0"
@@ -541,19 +538,10 @@ class validateURL(object):
 
 
 def validate_url(test_url):
-    # If hosts that only contain alphanumerics are allowed ("localhost" for example)
-    try:
-        url_validator(test_url, simple_host=allow_simplehost)
-    except validators.ValidationError:
-        #@todo check for xss
-        message = f"'{test_url}' is not a valid URL."
+    from changedetectionio.validate_url import is_safe_valid_url
+    if not is_safe_valid_url(test_url):
         # This should be wtforms.validators.
-        raise ValidationError(message)
-
-    from .model.Watch import is_safe_url
-    if not is_safe_url(test_url):
-        # This should be wtforms.validators.
-        raise ValidationError('Watch protocol is not permitted by SAFE_PROTOCOL_REGEX or incorrect URL format')
+        raise ValidationError('Watch protocol is not permitted or invalid URL format')
 
 
 class ValidateSinglePythonRegexString(object):
@@ -741,7 +729,6 @@ class quickWatchForm(Form):
     edit_and_watch_submit_button = SubmitField('Edit > Watch', render_kw={"class": "pure-button pure-button-primary"})
 
 
-
 # Common to a single watch and the global settings
 class commonSettingsForm(Form):
     from . import processors
@@ -754,7 +741,7 @@ class commonSettingsForm(Form):
 
     fetch_backend = RadioField(u'Fetch Method', choices=content_fetchers.available_fetchers(), validators=[ValidateContentFetcherIsReady()])
     notification_body = TextAreaField('Notification Body', default='{{ watch_url }} had a change.', validators=[validators.Optional(), ValidateJinja2Template()])
-    notification_format = SelectField('Notification format', choices=valid_notification_formats.keys())
+    notification_format = SelectField('Notification format', choices=list(valid_notification_formats.items()))
     notification_title = StringField('Notification Title', default='ChangeDetection.io Notification - {{ watch_url }}', validators=[validators.Optional(), ValidateJinja2Template()])
     notification_urls = StringListField('Notification URL List', validators=[validators.Optional(), ValidateAppRiseServers(), ValidateJinja2Template()])
     processor = RadioField( label=u"Processor - What do you want to achieve?", choices=processors.available_processors(), default="text_json_diff")
