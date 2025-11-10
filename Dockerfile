@@ -37,8 +37,6 @@ ENV CRYPTOGRAPHY_DONT_BUILD_RUST=1
 RUN --mount=type=cache,id=pip,sharing=locked,target=/tmp/pip-cache \
   pip install \
   --prefer-binary \
-  --extra-index-url https://www.piwheels.org/simple \
-  --extra-index-url https://pypi.anaconda.org/ARM-software/simple \
   --cache-dir=/tmp/pip-cache \
   --target=/dependencies \
   -r /requirements.txt
