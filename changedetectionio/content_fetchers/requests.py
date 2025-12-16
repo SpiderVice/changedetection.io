@@ -1,6 +1,7 @@
 from loguru import logger
 import hashlib
 import os
+import re
 import asyncio
 from changedetectionio import strtobool
 from changedetectionio.content_fetchers.exceptions import BrowserStepsInUnsupportedFetcher, EmptyReply, Non200ErrorCodeReceived
@@ -25,7 +26,9 @@ class fetcher(Fetcher):
             ignore_status_codes=False,
             current_include_filters=None,
             is_binary=False,
-            empty_pages_are_a_change=False):
+            empty_pages_are_a_change=False,
+            watch_uuid=None,
+            ):
         """Synchronous version of run - the original requests implementation"""
 
         import chardet
@@ -76,9 +79,22 @@ class fetcher(Fetcher):
         if not is_binary:
             # Don't run this for PDF (and requests identified as binary) takes a _long_ time
             if not r.headers.get('content-type') or not 'charset=' in r.headers.get('content-type'):
-                encoding = chardet.detect(r.content)['encoding']
-                if encoding:
-                    r.encoding = encoding
+                # For XML/RSS feeds, check the XML declaration for encoding attribute
+                # This is more reliable than chardet which can misdetect UTF-8 as MacRoman
+                content_type = r.headers.get('content-type', '').lower()
+                if 'xml' in content_type or 'rss' in content_type:
+                    # Look for <?xml version="1.0" encoding="UTF-8"?>
+                    xml_encoding_match = re.search(rb'<\?xml[^>]+encoding=["\']([^"\']+)["\']', r.content[:200])
+                    if xml_encoding_match:
+                        r.encoding = xml_encoding_match.group(1).decode('ascii')
+                    else:
+                        # Default to UTF-8 for XML if no encoding found
+                        r.encoding = 'utf-8'
+                else:
+                    # For other content types, use chardet
+                    encoding = chardet.detect(r.content)['encoding']
+                    if encoding:
+                        r.encoding = encoding
 
         self.headers = r.headers
 
@@ -115,6 +131,7 @@ class fetcher(Fetcher):
                   request_method=None,
                   timeout=None,
                   url=None,
+                  watch_uuid=None,
                   ):
         """Async wrapper that runs the synchronous requests code in a thread pool"""
         
@@ -132,7 +149,8 @@ class fetcher(Fetcher):
                 ignore_status_codes=ignore_status_codes,
                 current_include_filters=current_include_filters,
                 is_binary=is_binary,
-                empty_pages_are_a_change=empty_pages_are_a_change
+                empty_pages_are_a_change=empty_pages_are_a_change,
+                watch_uuid=watch_uuid,
             )
         )
 
@@ -149,3 +167,15 @@ class fetcher(Fetcher):
                 except Exception as e:
                     logger.warning(f"Failed to unlink screenshot: {screenshot} - {e}")
 
+
+# Plugin registration for built-in fetcher
+class RequestsFetcherPlugin:
+    """Plugin class that registers the requests fetcher as a built-in plugin."""
+
+    def register_content_fetcher(self):
+        """Register the requests fetcher"""
+        return ('html_requests', fetcher)
+
+
+# Create module-level instance for plugin registration
+requests_plugin = RequestsFetcherPlugin()

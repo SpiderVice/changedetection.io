@@ -1,5 +1,6 @@
 
 import time
+import re
 import apprise
 from apprise import NotifyFormat
 from loguru import logger
@@ -11,10 +12,9 @@ from ..diff import HTML_REMOVED_STYLE, REMOVED_PLACEMARKER_OPEN, REMOVED_PLACEMA
     CHANGED_PLACEMARKER_CLOSED, HTML_CHANGED_STYLE, HTML_CHANGED_INTO_STYLE
 import re
 
-from ..notification_service import NotificationContextData
+from ..notification_service import NotificationContextData, add_rendered_diff_to_notification_vars
 
 newline_re = re.compile(r'\r\n|\r|\n')
-
 
 def markup_text_links_to_html(body):
     """
@@ -78,6 +78,24 @@ def notification_format_align_with_apprise(n_format : str):
         n_format = NotifyFormat.TEXT.value
 
     return n_format
+
+
+def apply_html_color_to_body(n_body: str):
+    # https://github.com/dgtlmoon/changedetection.io/issues/821#issuecomment-1241837050
+    n_body = n_body.replace(REMOVED_PLACEMARKER_OPEN,
+                            f'<span style="{HTML_REMOVED_STYLE}" role="deletion" aria-label="Removed text" title="Removed text">')
+    n_body = n_body.replace(REMOVED_PLACEMARKER_CLOSED, f'</span>')
+    n_body = n_body.replace(ADDED_PLACEMARKER_OPEN,
+                            f'<span style="{HTML_ADDED_STYLE}" role="insertion" aria-label="Added text" title="Added text">')
+    n_body = n_body.replace(ADDED_PLACEMARKER_CLOSED, f'</span>')
+    # Handle changed/replaced lines (old → new)
+    n_body = n_body.replace(CHANGED_PLACEMARKER_OPEN,
+                            f'<span style="{HTML_CHANGED_STYLE}" role="note" aria-label="Changed text" title="Changed text">')
+    n_body = n_body.replace(CHANGED_PLACEMARKER_CLOSED, f'</span>')
+    n_body = n_body.replace(CHANGED_INTO_PLACEMARKER_OPEN,
+                            f'<span style="{HTML_CHANGED_INTO_STYLE}" role="note" aria-label="Changed into" title="Changed into">')
+    n_body = n_body.replace(CHANGED_INTO_PLACEMARKER_CLOSED, f'</span>')
+    return n_body
 
 def apply_discord_markdown_to_body(n_body):
     """
@@ -186,6 +204,8 @@ def replace_placemarkers_in_text(text, url, requested_output_format):
     return text
 
 def apply_service_tweaks(url, n_body, n_title, requested_output_format):
+
+    logger.debug(f"Applying markup in '{requested_output_format}' mode")
 
     # Re 323 - Limit discord length to their 2000 char limit total or it wont send.
     # Because different notifications may require different pre-processing, run each sequentially :(
@@ -331,6 +351,16 @@ def process_notification(n_object: NotificationContextData, datastore):
     if not n_object.get('notification_urls'):
         return None
 
+    n_object.update(add_rendered_diff_to_notification_vars(
+        notification_scan_text=n_object.get('notification_body', '')+n_object.get('notification_title', ''),
+        current_snapshot=n_object.get('current_snapshot'),
+        prev_snapshot=n_object.get('prev_snapshot'),
+        # Should always be false for 'text' mode or its too hard to read
+        # But otherwise, this could be some setting
+        word_diff=False if requested_output_format_original == 'text' else True,
+        )
+    )
+
     with (apprise.LogCapture(level=apprise.logging.DEBUG) as logs):
         for url in n_object['notification_urls']:
 
@@ -397,11 +427,15 @@ def process_notification(n_object: NotificationContextData, datastore):
                     apprise_input_format = NotifyFormat.TEXT.value
                     requested_output_format = NotifyFormat.TEXT.value
 
-
+#@todo on null:// (only if its a 1 url with null) probably doesnt need to actually .add/setup/etc
             sent_objs.append({'title': n_title,
                               'body': n_body,
-                              'url': url})
-            apobj.add(url)
+                              'url': url,
+                              # So that we can do a null:// call and get back exactly what would have been sent
+                              'original_context': n_object })
+
+            if not url.startswith('null://'):
+                apobj.add(url)
 
             # Since the output is always based on the plaintext of the 'diff' engine, wrap it nicely.
             # It should always be similar to the 'history' part of the UI.
@@ -409,15 +443,16 @@ def process_notification(n_object: NotificationContextData, datastore):
                 if not '<pre' in n_body and not '<body' in n_body: # No custom HTML-ish body was setup already
                     n_body = as_monospaced_html_email(content=n_body, title=n_title)
 
-        apobj.notify(
-            title=n_title,
-            body=n_body,
-            # `body_format` Tell apprise what format the INPUT is in, specify a wrong/bad type and it will force skip conversion in apprise
-            # &format= in URL Tell apprise what format the OUTPUT should be in (it can convert between)
-            body_format=apprise_input_format,
-            # False is not an option for AppRise, must be type None
-            attach=n_object.get('screenshot', None)
-        )
+        if not url.startswith('null://'):
+            apobj.notify(
+                title=n_title,
+                body=n_body,
+                # `body_format` Tell apprise what format the INPUT is in, specify a wrong/bad type and it will force skip conversion in apprise
+                # &format= in URL Tell apprise what format the OUTPUT should be in (it can convert between)
+                body_format=apprise_input_format,
+                # False is not an option for AppRise, must be type None
+                attach=n_object.get('screenshot', None)
+            )
 
         # Returns empty string if nothing found, multi-line string otherwise
         log_value = logs.getvalue()
@@ -436,6 +471,8 @@ def create_notification_parameters(n_object: NotificationContextData, datastore)
     if not isinstance(n_object, NotificationContextData):
         raise TypeError(f"Expected NotificationContextData, got {type(n_object)}")
 
+    ext_base_url = datastore.data['settings']['application'].get('active_base_url').strip('/')+'/'
+
     watch = datastore.data['watching'].get(n_object['uuid'])
     if watch:
         watch_title = datastore.data['watching'][n_object['uuid']].label
@@ -449,20 +486,29 @@ def create_notification_parameters(n_object: NotificationContextData, datastore)
         watch_title = 'Change Detection'
         watch_tag = ''
 
-    # Create URLs to customise the notification with
-    # active_base_url - set in store.py data property
-    base_url = datastore.data['settings']['application'].get('active_base_url')
-
     watch_url = n_object['watch_url']
 
-    diff_url = "{}/diff/{}".format(base_url, n_object['uuid'])
-    preview_url = "{}/preview/{}".format(base_url, n_object['uuid'])
+    # Build URLs manually instead of using url_for() to avoid requiring a request context
+    # This allows notifications to be processed in background threads
+    uuid = n_object['uuid']
 
+    if n_object.get('timestamp_from') and n_object.get('timestamp_to'):
+        # Include a link to the diff page with specific versions
+        diff_url = f"{ext_base_url}diff/{uuid}?from_version={n_object['timestamp_from']}&to_version={n_object['timestamp_to']}"
+    else:
+        diff_url = f"{ext_base_url}diff/{uuid}"
+
+    preview_url = f"{ext_base_url}preview/{uuid}"
+    edit_url = f"{ext_base_url}edit/{uuid}"
+
+    # @todo test that preview_url is correct when running in not-null mode?
+    # if not, first time app loads i think it can set a flask context
     n_object.update(
         {
-            'base_url': base_url,
+            'base_url': ext_base_url,
             'diff_url': diff_url,
-            'preview_url': preview_url,
+            'preview_url': preview_url, #@todo include 'version='
+            'edit_url': edit_url, #@todo also pause, also mute link
             'watch_tag': watch_tag if watch_tag is not None else '',
             'watch_title': watch_title if watch_title is not None else '',
             'watch_url': watch_url,

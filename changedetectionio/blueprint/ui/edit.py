@@ -206,7 +206,7 @@ def construct_blueprint(datastore: ChangeDetectionStore, update_q, queuedWatchMe
 
             # Diff page [edit] link should go back to diff page
             if request.args.get("next") and request.args.get("next") == 'diff':
-                return redirect(url_for('ui.ui_views.diff_history_page', uuid=uuid))
+                return redirect(url_for('ui.ui_diff.diff_history_page', uuid=uuid))
 
             return redirect(url_for('watchlist.index', tag=request.args.get("tag",'')))
 
@@ -223,20 +223,14 @@ def construct_blueprint(datastore: ChangeDetectionStore, update_q, queuedWatchMe
 
             watch = datastore.data['watching'].get(uuid)
 
-            # if system or watch is configured to need a chrome type browser
-            system_uses_webdriver = datastore.data['settings']['application']['fetch_backend'] == 'html_webdriver'
-            watch_needs_selenium_or_playwright = False
-            if (watch.get('fetch_backend') == 'system' and system_uses_webdriver) or watch.get('fetch_backend') == 'html_webdriver' or watch.get('fetch_backend', '').startswith('extra_browser_'):
-                watch_needs_selenium_or_playwright = True
-
-
             from zoneinfo import available_timezones
 
-            # Only works reliably with Playwright
-
             # Import the global plugin system
-            from changedetectionio.pluggy_interface import collect_ui_edit_stats_extras
-            
+            from changedetectionio.pluggy_interface import collect_ui_edit_stats_extras, get_fetcher_capabilities
+
+            # Get fetcher capabilities instead of hardcoded logic
+            capabilities = get_fetcher_capabilities(watch, datastore)
+            app_rss_token = datastore.data['settings']['application'].get('rss_access_token'),
             template_args = {
                 'available_processors': processors.available_processors(),
                 'available_timezones': sorted(available_timezones()),
@@ -252,6 +246,11 @@ def construct_blueprint(datastore: ChangeDetectionStore, update_q, queuedWatchMe
                 'has_special_tag_options': _watch_has_tag_options_set(watch=watch),
                 'jq_support': jq_support,
                 'playwright_enabled': os.getenv('PLAYWRIGHT_DRIVER_URL', False),
+                'app_rss_token': app_rss_token,
+                'rss_uuid_feed' : {
+                    'label': watch.label,
+                    'url': url_for('rss.rss_single_watch', uuid=watch['uuid'], token=app_rss_token)
+                },
                 'settings_application': datastore.data['settings']['application'],
                 'system_has_playwright_configured': os.getenv('PLAYWRIGHT_DRIVER_URL'),
                 'system_has_webdriver_configured': os.getenv('WEBDRIVER_URL'),
@@ -261,7 +260,7 @@ def construct_blueprint(datastore: ChangeDetectionStore, update_q, queuedWatchMe
                 'using_global_webdriver_wait': not default['webdriver_delay'],
                 'uuid': uuid,
                 'watch': watch,
-                'watch_needs_selenium_or_playwright': watch_needs_selenium_or_playwright,
+                'capabilities': capabilities
             }
 
             included_content = None
@@ -335,6 +334,6 @@ def construct_blueprint(datastore: ChangeDetectionStore, update_q, queuedWatchMe
                     s = re.sub(r'[0-9]+', r'\\d+', s)
                     datastore.data["watching"][uuid]['ignore_text'].append('/' + s + '/')
 
-        return f"<a href={url_for('ui.ui_views.preview_page', uuid=uuid)}>Click to preview</a>"
+        return f"<a href={url_for('ui.ui_preview.preview_page', uuid=uuid)}>Click to preview</a>"
     
     return edit_blueprint

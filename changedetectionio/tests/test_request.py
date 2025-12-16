@@ -48,7 +48,7 @@ def test_headers_in_request(client, live_server, measure_memory_usage, datastore
 
     # The service should echo back the request headers
     res = client.get(
-        url_for("ui.ui_views.preview_page", uuid="first"),
+        url_for("ui.ui_preview.preview_page", uuid="first"),
         follow_redirects=True
     )
 
@@ -126,7 +126,7 @@ def test_body_in_request(client, live_server, measure_memory_usage, datastore_pa
 
     # The service should echo back the body
     res = client.get(
-        url_for("ui.ui_views.preview_page", uuid="first"),
+        url_for("ui.ui_preview.preview_page", uuid="first"),
         follow_redirects=True
     )
 
@@ -142,7 +142,7 @@ def test_body_in_request(client, live_server, measure_memory_usage, datastore_pa
     client.get(url_for("ui.form_watch_checknow"), follow_redirects=True)
     wait_for_all_checks(client)
     watches_with_body = 0
-    with open(os.path.join(datastore_path, 'url-watches.json')) as f:
+    with open(os.path.join(datastore_path, 'url-watches.json'), encoding='utf-8') as f:
         app_struct = json.load(f)
         for uuid in app_struct['watching']:
             if app_struct['watching'][uuid]['body']==body_value:
@@ -215,7 +215,7 @@ def test_method_in_request(client, live_server, measure_memory_usage, datastore_
 
     # The service should echo back the request verb
     res = client.get(
-        url_for("ui.ui_views.preview_page", uuid="first"),
+        url_for("ui.ui_preview.preview_page", uuid="first"),
         follow_redirects=True
     )
 
@@ -225,7 +225,7 @@ def test_method_in_request(client, live_server, measure_memory_usage, datastore_
     wait_for_all_checks(client)
 
     watches_with_method = 0
-    with open(os.path.join(datastore_path, 'url-watches.json')) as f:
+    with open(os.path.join(datastore_path, 'url-watches.json'), encoding='utf-8') as f:
         app_struct = json.load(f)
         for uuid in app_struct['watching']:
             if app_struct['watching'][uuid]['method'] == 'PATCH':
@@ -257,7 +257,7 @@ def test_ua_global_override(client, live_server, measure_memory_usage, datastore
 
     wait_for_all_checks(client)
     res = client.get(
-        url_for("ui.ui_views.preview_page", uuid="first"),
+        url_for("ui.ui_preview.preview_page", uuid="first"),
         follow_redirects=True
     )
 
@@ -281,7 +281,7 @@ def test_ua_global_override(client, live_server, measure_memory_usage, datastore
     assert b"Updated watch." in res.data
     wait_for_all_checks(client)
     res = client.get(
-        url_for("ui.ui_views.preview_page", uuid="first"),
+        url_for("ui.ui_preview.preview_page", uuid="first"),
         follow_redirects=True
     )
     assert b"agent-from-watch" in res.data
@@ -376,7 +376,7 @@ def test_headers_textfile_in_request(client, live_server, measure_memory_usage, 
 
     # The service should echo back the request verb
     res = client.get(
-        url_for("ui.ui_views.preview_page", uuid="first"),
+        url_for("ui.ui_preview.preview_page", uuid="first"),
         follow_redirects=True
     )
 

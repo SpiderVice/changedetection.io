@@ -8,8 +8,13 @@
     <meta name="robots" content="noindex">
     <title>Change Detection{{extra_title}}</title>
     {% if app_rss_token %}
-      <link rel="alternate" type="application/rss+xml" title="Changedetection.io » Feed{% if active_tag_uuid %}- {{active_tag.title}}{% endif %}" href="{{ url_for('rss.feed', tag=active_tag_uuid , token=app_rss_token)}}" >
-    {% endif %}
+        <link rel="alternate" type="application/rss+xml" title="Changedetection.io » Feed{% if active_tag_uuid %}- {{active_tag.title}}{% endif %}" href="{{ url_for('rss.feed', tag=active_tag_uuid, token=app_rss_token, _external=True )}}" >
+
+        {% if rss_uuid_feed %}
+        <link rel="alternate" type="application/rss+xml" title="Feed » {{ rss_uuid_feed['label'] }}" href="{{ rss_uuid_feed['url'] }}" >
+
+        {%- endif -%}
+    {%- endif -%}
     <link rel="stylesheet" href="{{url_for('static_content', group='styles', filename='pure-min.css')}}" >
     <link rel="stylesheet" href="{{url_for('static_content', group='styles', filename='styles.css')}}?v={{ get_css_version() }}" >
     {% if extra_stylesheets %}
@@ -43,7 +48,7 @@
 
   <body class="{{extra_classes}}">
     <div class="header">
-    <div class="pure-menu-fixed" style="width: 100%;">
+    <div {% if pure_menu_fixed != False %}class="pure-menu-fixed"{% endif %} style="width: 100%;">
       <div class="home-menu pure-menu pure-menu-horizontal" id="nav-menu">
 
         {% if has_password and not current_user.is_authenticated %}
@@ -147,8 +152,6 @@
 
     {% if left_sticky %}
       <div class="sticky-tab" id="left-sticky">
-        <a href="{{url_for('ui.ui_views.preview_page', uuid=uuid)}}">Show current snapshot</a><br>
-          Visualise <strong>triggers</strong> and <strong>ignored text</strong>
       </div>
     {% endif %}
     {% if right_sticky %}
@@ -231,8 +234,13 @@
     </section>
     <script src="{{url_for('static_content', group='js', filename='toggle-theme.js')}}" defer></script>
 
-    <div id="checking-now-fixed-tab" style="display: none;"><span class="spinner"></span><span>&nbsp;Checking now</span></div>
+    <div id="checking-now-fixed-tab" style="display: none;"><span class="spinner"></span><span class="status-text">&nbsp;Checking now</span></div>
     <div id="realtime-conn-error" style="display:none">Real-time updates offline</div>
+    {% if bottom_horizontal_offscreen_contents %}
+        <div id="bottom-horizontal-offscreen" style="display:none">
+            {{ bottom_horizontal_offscreen_contents|safe }}
+        </div>
+    {% endif %}
   </body>
 
 </html>

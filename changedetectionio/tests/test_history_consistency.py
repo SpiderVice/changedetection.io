@@ -40,7 +40,7 @@ def test_consistent_history(client, live_server, measure_memory_usage, datastore
     json_db_file = os.path.join(live_server.app.config['DATASTORE'].datastore_path, 'url-watches.json')
 
     json_obj = None
-    with open(json_db_file, 'r') as f:
+    with open(json_db_file, 'r', encoding='utf-8') as f:
         json_obj = json.load(f)
 
     # assert the right amount of watches was found in the JSON
@@ -76,7 +76,7 @@ def test_consistent_history(client, live_server, measure_memory_usage, datastore
         assert len(files_in_watch_dir) == 3, "Should be just three files in the dir, html.br snapshot, history.txt and the extracted text snapshot"
 
     json_db_file = os.path.join(live_server.app.config['DATASTORE'].datastore_path, 'url-watches.json')
-    with open(json_db_file, 'r') as f:
+    with open(json_db_file, 'r', encoding='utf-8') as f:
         assert '"default"' not in f.read(), "'default' probably shouldnt be here, it came from when the 'default' Watch vars were accidently being saved"
 
 
@@ -100,7 +100,7 @@ def test_check_text_history_view(client, live_server, measure_memory_usage, data
     client.get(url_for("ui.form_watch_checknow"), follow_redirects=True)
     wait_for_all_checks(client)
 
-    res = client.get(url_for("ui.ui_views.diff_history_page", uuid="first"))
+    res = client.get(url_for("ui.ui_diff.diff_history_page", uuid="first"))
     assert b'test-one' in res.data
     assert b'test-two' in res.data
 
@@ -112,7 +112,7 @@ def test_check_text_history_view(client, live_server, measure_memory_usage, data
     wait_for_all_checks(client)
 
     # It should remember the last viewed time, so the first difference is not shown
-    res = client.get(url_for("ui.ui_views.diff_history_page", uuid="first"))
+    res = client.get(url_for("ui.ui_diff.diff_history_page", uuid="first"))
     assert b'test-three' in res.data
     assert b'test-two' in res.data
     assert b'test-one' not in res.data

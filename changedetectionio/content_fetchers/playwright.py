@@ -89,6 +89,20 @@ class fetcher(Fetcher):
 
     proxy = None
 
+    # Capability flags
+    supports_browser_steps = True
+    supports_screenshots = True
+    supports_xpath_element_data = True
+
+    @classmethod
+    def get_status_icon_data(cls):
+        """Return Chrome browser icon data for Playwright fetcher."""
+        return {
+            'filename': 'google-chrome-icon.png',
+            'alt': 'Using a Chrome browser',
+            'title': 'Using a Chrome browser'
+        }
+
     def __init__(self, proxy_override=None, custom_browser_connection_url=None):
         super().__init__()
 
@@ -139,7 +153,7 @@ class fetcher(Fetcher):
         content = await self.page.content()
         destination = os.path.join(self.browser_steps_screenshot_path, 'step_{}.html'.format(step_n))
         logger.debug(f"Saving step HTML to {destination}")
-        with open(destination, 'w') as f:
+        with open(destination, 'w', encoding='utf-8') as f:
             f.write(content)
 
     async def run(self,
@@ -153,6 +167,7 @@ class fetcher(Fetcher):
                   request_method=None,
                   timeout=None,
                   url=None,
+                  watch_uuid=None,
                   ):
 
         from playwright.async_api import async_playwright
@@ -328,6 +343,19 @@ class fetcher(Fetcher):
                 except:
                     pass
                 browser = None
+
+
+# Plugin registration for built-in fetcher
+class PlaywrightFetcherPlugin:
+    """Plugin class that registers the Playwright fetcher as a built-in plugin."""
+
+    def register_content_fetcher(self):
+        """Register the Playwright fetcher"""
+        return ('html_webdriver', fetcher)
+
+
+# Create module-level instance for plugin registration
+playwright_plugin = PlaywrightFetcherPlugin()
 
 
 
