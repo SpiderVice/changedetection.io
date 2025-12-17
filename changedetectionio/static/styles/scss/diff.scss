@@ -50,10 +50,7 @@ body.difference-page {
   background: var(--color-background);
   padding: 1rem;
   border-radius: 5px;
-
-  @media (min-width: 767px) {
-    min-width: 50%;
-  }
+  width: 95%;
 
   // The first tab 'text' diff
   #text {
