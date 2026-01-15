@@ -2,6 +2,7 @@
  * -- BASE STYLES --
  */
 
+@use "settings" as *;
 @use "parts/variables";
 @use "parts/arrows";
 @use "parts/browser-steps";
@@ -21,6 +22,17 @@
 @use "parts/socket";
 @use "parts/visualselector";
 @use "parts/widgets";
+@use "parts/diff_image";
+@use "parts/modal";
+@use "parts/language";
+@use "parts/action_sidebar";
+@use "parts/hamburger_menu";
+@use "parts/search_modal";
+@use "parts/notification_bubble";
+@use "parts/toast";
+@use "parts/login_form";
+@use "parts/tabs";
+
 
 body {
   color: var(--color-text);
@@ -68,20 +80,6 @@ a.github-link {
   }
 }
 
-#search-q {
-  opacity: 0;
-  -webkit-transition: all .9s ease;
-  -moz-transition: all .9s ease;
-  transition: all .9s ease;
-  width: 0;
-  display: none;
-  &.expanded {
-    width: auto;
-    display: inline-block;
-
-    opacity: 1;
-  }
-}
 #search-result-info {
   color: #fff;
 }
@@ -162,7 +160,13 @@ body.spinner-active {
 }
 
 section.content {
-  padding-top: 100px;
+  @media only screen and (max-width: $desktop-wide-breakpoint) {
+    padding-top: 80px;
+  }
+  @media only screen and (min-width: $desktop-wide-breakpoint) {
+    padding-top: 100px;
+  }
+
   padding-bottom: 1em;
   flex-direction: column;
   display: flex;
@@ -180,6 +184,13 @@ code {
   border-radius: 5px;
   padding: 2px 5px;
   margin-right: 4px;
+  line-height: 1.2rem;
+}
+
+/* Processor type badges - colors auto-generated from processor names */
+.processor-badge {
+  @extend .inline-tag;
+  font-weight: 900;
 }
 
 .watch-tag-list {
@@ -512,6 +523,9 @@ footer {
 }
 
 .sticky-tab {
+  @media only screen and (max-width: $desktop-wide-breakpoint) {
+    display: none;
+  }
   position: absolute;
   top: 60px;
   font-size: 65%;
@@ -656,7 +670,7 @@ footer {
 
 
 @media only screen and (max-width: 760px),
-(min-device-width: 768px) and (max-device-width: 1024px) {
+(min-device-width: 768px) and (max-device-width: $desktop-wide-breakpoint) {
   .edit-form {
     padding: 0.5em;
     margin: 0;
@@ -668,30 +682,10 @@ footer {
 }
 
 
-@media only screen and (max-width: 760px),
-(min-device-width: 768px) and (max-device-width: 800px) {
-
-  div.sticky-tab#hosted-sticky {
-    top: 60px;
-    left: 0px;
-    right: auto;
-  }
-
-  section.content {
-    padding-top: 110px;
-  }
-
-  // Make the tabs easier to hit, they will be all nice and horizontal
-  div.tabs.collapsable ul li {
-    display: block;
-    border-radius: 0px;
-    margin-right: 0px;
-  }
-
+@media only screen and (max-width: 760px), (min-device-width: 768px) and (max-device-width: $desktop-wide-breakpoint) {
   input[type='text'] {
     width: 100%;
   }
-
 }
 
 .pure-table {
@@ -767,45 +761,6 @@ textarea::placeholder {
 }
 
 
-.tabs {
-  ul {
-    margin: 0px;
-    padding: 0px;
-    display: block;
-
-    li {
-      margin-right: 3px;
-      display: inline-block;
-      color: var(--color-text-tab);
-      border-top-left-radius: 5px;
-      border-top-right-radius: 5px;
-      background-color: var(--color-background-tab);
-
-      &:not(.active) {
-        &:hover {
-          background-color: var(--color-background-tab-hover);
-        }
-      }
-
-      &.active,
-      :target {
-        background-color: var(--color-background);
-
-        a {
-          color: var(--color-text-tab-active);
-          font-weight: bold;
-        }
-      }
-
-      a {
-        display: block;
-        padding: 0.8em;
-        color: var(--color-text-tab);
-      }
-    }
-  }
-}
-
 $form-edge-padding: 20px;
 
 .pure-form-stacked {
@@ -814,14 +769,7 @@ $form-edge-padding: 20px;
   }
 }
 
-.login-form {
-  .inner {
-    background: var(--color-background);
-    ;
-    padding: $form-edge-padding;
-    border-radius: 5px;
-  }
-}
+// Login form styles moved to parts/_login_form.scss
 
 .tab-pane-inner {
 
@@ -1148,4 +1096,5 @@ ul#highlightSnippetActions {
     display: inline-block;
   }
 }
+
 

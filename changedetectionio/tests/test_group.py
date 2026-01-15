@@ -145,7 +145,8 @@ def test_tag_import_singular(client, live_server, measure_memory_usage, datastor
         follow_redirects=True
     )
     # Should be only 1 tag because they both had the same
-    assert res.data.count(b'test-tag') == 1
+    assert len(live_server.app.config['DATASTORE'].data['settings']['application'].get('tags')) ==1
+
     delete_all_watches(client)
 
 def test_tag_add_in_ui(client, live_server, measure_memory_usage, datastore_path):
@@ -209,6 +210,8 @@ def test_group_tag_notification(client, live_server, measure_memory_usage, datas
 
     set_modified_response(datastore_path=datastore_path)
     client.get(url_for("ui.form_watch_checknow"), follow_redirects=True)
+    wait_for_all_checks(client)
+
     time.sleep(3)
 
     assert os.path.isfile(os.path.join(datastore_path, "notification.txt"))

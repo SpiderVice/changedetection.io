@@ -1,4 +1,4 @@
-from .. import difference_detection_processor
+from ..base import difference_detection_processor
 from ..exceptions import ProcessorException
 from . import Restock
 from loguru import logger
@@ -7,8 +7,14 @@ import urllib3
 import time
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-name = 'Re-stock & Price detection for pages with a SINGLE product'
-description = 'Detects if the product goes back to in-stock'
+# Translatable strings - extracted by pybabel, translated at runtime in __init__.py
+# Use a marker function so pybabel can extract these strings
+def _(x): return x  # Translation marker for extraction only
+name = _('Re-stock & Price detection for pages with a SINGLE product')
+description = _('Detects if the product goes back to in-stock')
+del _  # Remove marker function
+processor_weight = 1
+list_badge_text = "Restock"  # _()
 
 class UnableToExtractRestockData(Exception):
     def __init__(self, status_code):
