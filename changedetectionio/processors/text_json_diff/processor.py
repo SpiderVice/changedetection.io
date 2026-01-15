@@ -1,7 +1,7 @@
 # HTML to TEXT/JSON DIFFERENCE self.fetcher
 
 import hashlib
-#import json
+import json
 import os
 import re
 import urllib3
