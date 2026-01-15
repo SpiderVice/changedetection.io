@@ -282,9 +282,9 @@ class ContentProcessor:
         # Then we re-format it, else it does have filters (later on) which will reformat it anyway
         content = html_tools.extract_json_as_string(content=raw_content, json_filter="json:$")
 
-        # Sort JSON to avoid false alerts from reordering
+        # Sort JSON to avoid false alerts from reordering // changed to not sort, I don't want this for this fork's usecase
         try:
-            content = json.dumps(json.loads(content), sort_keys=True, indent=2, ensure_ascii=False)
+            content = json.dumps(json.loads(content), indent=2, ensure_ascii=False)
         except Exception:
             # Might be malformed JSON, continue anyway
             pass
