@@ -86,7 +86,18 @@ jobs:
           version: latest
           driver-opts: image=moby/buildkit:master
 
-      # dev branch -> :dev container tag
+      # master branch -> :dev container tag
+      - name: Docker meta :dev
+        if: ${{ github.ref == 'refs/heads/master' && github.event_name != 'release' }}
+        uses: docker/metadata-action@v5
+        id: meta_dev
+        with:
+          images: |
+            ${{ secrets.DOCKER_HUB_USERNAME }}/changedetection.io
+            ghcr.io/${{ github.repository }}
+          tags: |
+            type=raw,value=dev
+
       - name: Build and push :dev
         id: docker_build
         if: ${{ github.ref }} == "refs/heads/dev"

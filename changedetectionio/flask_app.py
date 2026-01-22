@@ -44,6 +44,8 @@ from changedetectionio.api import Watch, WatchHistory, WatchSingleHistory, Watch
 from changedetectionio.api.Search import Search
 from .time_handler import is_within_schedule
 from changedetectionio.languages import get_available_languages, get_language_codes, get_flag_for_locale, get_timeago_locale
+from changedetectionio.favicon_utils import get_favicon_mime_type
+
 IN_PYTEST = "pytest" in sys.modules or "PYTEST_CURRENT_TEST" in os.environ
 
 datastore = None
@@ -69,9 +71,13 @@ socketio_server = None
 CORS(app)
 
 # Super handy for compressing large BrowserSteps responses and others
-FlaskCompress(app)
-app.config['COMPRESS_MIN_SIZE'] = 4096
+# Flask-Compress handles HTTP compression, Socket.IO compression disabled to prevent memory leak
+compress = FlaskCompress()
+app.config['COMPRESS_MIN_SIZE'] = 2096
 app.config['COMPRESS_MIMETYPES'] = ['text/html', 'text/css', 'text/javascript', 'application/json', 'application/javascript', 'image/svg+xml']
+# Use gzip only - smaller memory footprint than zstd/brotli (4-8KB vs 200-500KB contexts)
+app.config['COMPRESS_ALGORITHM'] = ['gzip']
+compress.init_app(app)
 app.config['TEMPLATES_AUTO_RELOAD'] = False
 
 
@@ -87,6 +93,14 @@ if os.getenv('FLASK_SERVER_NAME'):
 # Babel/i18n configuration
 app.config['BABEL_TRANSLATION_DIRECTORIES'] = str(Path(__file__).parent / 'translations')
 app.config['BABEL_DEFAULT_LOCALE'] = 'en_GB'
+
+# Session configuration
+# NOTE: Flask session (for locale, etc.) is separate from Flask-Login's remember-me cookie
+# - Flask session stores data like session['locale'] in a signed cookie
+# - Flask-Login's remember=True creates a separate authentication cookie
+# - Setting PERMANENT_SESSION_LIFETIME controls how long the Flask session cookie lasts
+from datetime import timedelta
+app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=3650)  # ~10 years (effectively unlimited)
 
 #app.config["EXPLAIN_TEMPLATE_LOADING"] = True
 
@@ -400,11 +414,27 @@ def changedetection_app(config=None, datastore_o=None):
     language_codes = get_language_codes()
 
     def get_locale():
+        # Locale aliases: map browser language codes to translation directory names
+        # This handles cases where browsers send standard codes (e.g., zh-TW)
+        # but our translations use more specific codes (e.g., zh_Hant_TW)
+        locale_aliases = {
+            'zh-TW': 'zh_Hant_TW',  # Traditional Chinese: browser sends zh-TW, we use zh_Hant_TW
+            'zh_TW': 'zh_Hant_TW',  # Also handle underscore variant
+        }
+
         # 1. Try to get locale from session (user explicitly selected)
         if 'locale' in session:
             return session['locale']
+
         # 2. Fall back to Accept-Language header
-        return request.accept_languages.best_match(language_codes)
+        # Get the best match from browser's Accept-Language header
+        browser_locale = request.accept_languages.best_match(language_codes + list(locale_aliases.keys()))
+
+        # 3. Check if we need to map the browser locale to our internal locale
+        if browser_locale in locale_aliases:
+            return locale_aliases[browser_locale]
+
+        return browser_locale
 
     # Initialize Babel with locale selector
     babel = Babel(app, locale_selector=get_locale)
@@ -528,6 +558,9 @@ def changedetection_app(config=None, datastore_o=None):
 
         # Validate the locale against available languages
         if locale in language_codes:
+            # Make session permanent so language preference persists across browser sessions
+            # NOTE: This is the Flask session cookie (separate from Flask-Login's remember-me auth cookie)
+            session.permanent = True
             session['locale'] = locale
 
             # CRITICAL: Flask-Babel caches the locale in the request context (ctx.babel_locale)
@@ -666,16 +699,9 @@ def changedetection_app(config=None, datastore_o=None):
 
             favicon_filename = watch.get_favicon_filename()
             if favicon_filename:
-                try:
-                    import magic
-                    mime = magic.from_file(
-                        os.path.join(watch.watch_data_dir, favicon_filename),
-                        mime=True
-                    )
-                except ImportError:
-                    # Fallback, no python-magic
-                    import mimetypes
-                    mime, encoding = mimetypes.guess_type(favicon_filename)
+                # Use cached MIME type detection
+                filepath = os.path.join(watch.watch_data_dir, favicon_filename)
+                mime = get_favicon_mime_type(filepath)
 
                 response = make_response(send_from_directory(watch.watch_data_dir, favicon_filename))
                 response.headers['Content-type'] = mime
