@@ -124,12 +124,12 @@ def sigshutdown_handler(_signo, _stack_frame):
         except Exception as e:
             logger.error(f"Error shutting down Socket.IO server: {str(e)}")
     
-    # Save data quickly - force immediate save using abstract method
+    # Save data quickly
     try:
-        datastore.force_save_all()
-        logger.success('Fast sync to storage complete.')
+        datastore.sync_to_json()
+        logger.success('Fast sync to disk complete.')
     except Exception as e:
-        logger.error(f"Error syncing to storage: {str(e)}")
+        logger.error(f"Error syncing to disk: {str(e)}")
     
     sys.exit()
 

@@ -24,7 +24,6 @@ def _handle_operations(op, uuids, datastore, worker_pool, update_q, queuedWatchM
         for uuid in uuids:
             if datastore.data['watching'].get(uuid):
                 datastore.data['watching'][uuid]['paused'] = True
-                datastore.mark_watch_dirty(uuid)
         if emit_flash:
             flash(gettext("{} watches paused").format(len(uuids)))
 
@@ -32,7 +31,6 @@ def _handle_operations(op, uuids, datastore, worker_pool, update_q, queuedWatchM
         for uuid in uuids:
             if datastore.data['watching'].get(uuid):
                 datastore.data['watching'][uuid.strip()]['paused'] = False
-                datastore.mark_watch_dirty(uuid)
         if emit_flash:
             flash(gettext("{} watches unpaused").format(len(uuids)))
 
@@ -47,7 +45,6 @@ def _handle_operations(op, uuids, datastore, worker_pool, update_q, queuedWatchM
         for uuid in uuids:
             if datastore.data['watching'].get(uuid):
                 datastore.data['watching'][uuid]['notification_muted'] = True
-                datastore.mark_watch_dirty(uuid)
         if emit_flash:
             flash(gettext("{} watches muted").format(len(uuids)))
 
@@ -55,7 +52,6 @@ def _handle_operations(op, uuids, datastore, worker_pool, update_q, queuedWatchM
         for uuid in uuids:
             if datastore.data['watching'].get(uuid):
                 datastore.data['watching'][uuid]['notification_muted'] = False
-                datastore.mark_watch_dirty(uuid)
         if emit_flash:
             flash(gettext("{} watches un-muted").format(len(uuids)))
 
@@ -71,7 +67,6 @@ def _handle_operations(op, uuids, datastore, worker_pool, update_q, queuedWatchM
         for uuid in uuids:
             if datastore.data['watching'].get(uuid):
                 datastore.data['watching'][uuid]["last_error"] = False
-                datastore.mark_watch_dirty(uuid)
         if emit_flash:
             flash(gettext("{} watches errors cleared").format(len(uuids)))
 
