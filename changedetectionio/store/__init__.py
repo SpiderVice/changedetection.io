@@ -9,18 +9,14 @@ from flask import (
 )
 from flask_babel import gettext
 
-from ..blueprint.rss import RSS_CONTENT_FORMAT_DEFAULT
-from ..html_tools import TRANSLATE_WHITESPACE_TABLE
-from ..model import App, Watch, USE_SYSTEM_DEFAULT_NOTIFICATION_FORMAT_FOR_WATCH
-from copy import deepcopy, copy
+from ..model import App, Watch
+from copy import deepcopy
 from os import path, unlink
-from threading import Lock
 import json
 import os
 import re
 import secrets
 import sys
-import threading
 import time
 import uuid as uuid_builder
 from loguru import logger
@@ -35,7 +31,6 @@ except ImportError:
     HAS_ORJSON = False
 
 from ..processors import get_custom_watch_obj_for_processor
-from ..processors.restock_diff import Restock
 
 # Import the base class and helpers
 from .file_saving_datastore import FileSavingDataStore, load_all_watches, save_watch_atomic, save_json_atomic
@@ -137,6 +132,19 @@ class ChangeDetectionStore(DatastoreUpdatesMixin, FileSavingDataStore):
             )
             logger.info(f"Tag: {uuid} {tag['title']}")
 
+    def _rehydrate_watches(self):
+        """Rehydrate watch entities from stored data (converts dicts to Watch objects)."""
+        watch_count = len(self.__data.get('watching', {}))
+        if watch_count == 0:
+            return
+
+        logger.info(f"Rehydrating {watch_count} watches...")
+        watching_rehydrated = {}
+        for uuid, watch_dict in self.__data.get('watching', {}).items():
+            watching_rehydrated[uuid] = self.rehydrate_entity(uuid, watch_dict)
+        self.__data['watching'] = watching_rehydrated
+        logger.success(f"Rehydrated {watch_count} watches into Watch objects")
+
 
     def _load_state(self):
         """
@@ -171,7 +179,7 @@ class ChangeDetectionStore(DatastoreUpdatesMixin, FileSavingDataStore):
         self.json_store_path = os.path.join(self.datastore_path, "changedetection.json")
 
         # Base definition for all watchers (deepcopy part of #569)
-        self.generic_definition = deepcopy(Watch.model(datastore_path=datastore_path, default={}))
+        self.generic_definition = deepcopy(Watch.model(datastore_path=datastore_path, __datastore=self.__data, default={}))
 
         # Load build SHA if available (Docker deployments)
         if path.isfile('changedetectionio/source.txt'):
@@ -215,23 +223,29 @@ class ChangeDetectionStore(DatastoreUpdatesMixin, FileSavingDataStore):
                 logger.critical(f"Legacy datastore detected at {self.datastore_path}/url-watches.json")
                 logger.critical("Migration will be triggered via update_26")
 
-                # Load the legacy datastore to get its schema_version
+                # Load the legacy datastore
                 from .legacy_loader import load_legacy_format
                 legacy_path = os.path.join(self.datastore_path, "url-watches.json")
-                with open(legacy_path) as f:
-                    self.__data = json.load(f)
+                legacy_data = load_legacy_format(legacy_path)
 
-                if not self.__data:
+                if not legacy_data:
                     raise Exception("Failed to load legacy datastore from url-watches.json")
 
-                # update_26 will load the legacy data again and migrate to new format
-                # Only run updates AFTER the legacy schema version (e.g., if legacy is at 25, only run 26+)
+                # Store the loaded data
+                self.__data = legacy_data
+
+                # CRITICAL: Rehydrate watches from dicts into Watch objects
+                # This ensures watches have their methods available during migration
+                self._rehydrate_watches()
+
+                # update_26 will save watches to individual files and create changedetection.json
+                # Next startup will load from new format normally
                 self.run_updates()
 
 
             else:
                 # Fresh install - create new datastore
-                logger.critical(f"No datastore found, creating new datastore at {self.datastore_path}")
+                logger.warning(f"No datastore found, creating new datastore at {self.datastore_path}")
 
                 # Set schema version to latest (no updates needed)
                 updates_available = self.get_updates_available()
@@ -305,7 +319,7 @@ class ChangeDetectionStore(DatastoreUpdatesMixin, FileSavingDataStore):
         if entity.get('processor') != 'text_json_diff':
             logger.trace(f"Loading Watch object '{watch_class.__module__}.{watch_class.__name__}' for UUID {uuid}")
 
-        entity = watch_class(datastore_path=self.datastore_path, default=entity)
+        entity = watch_class(datastore_path=self.datastore_path, __datastore=self.__data, default=entity)
         return entity
 
     # ============================================================================
@@ -524,7 +538,11 @@ class ChangeDetectionStore(DatastoreUpdatesMixin, FileSavingDataStore):
     # Clone a watch by UUID
     def clone(self, uuid):
         url = self.data['watching'][uuid].get('url')
-        extras = deepcopy(self.data['watching'][uuid])
+        # No need to deepcopy here - add_watch() will deepcopy extras anyway (line 569)
+        # Just pass a dict copy (with lock for thread safety)
+        # NOTE: dict() is shallow copy but safe since add_watch() deepcopies it
+        with self.lock:
+            extras = dict(self.data['watching'][uuid])
         new_uuid = self.add_watch(url=url, extras=extras)
         watch = self.data['watching'][new_uuid]
         return new_uuid
@@ -623,7 +641,7 @@ class ChangeDetectionStore(DatastoreUpdatesMixin, FileSavingDataStore):
 
         # If the processor also has its own Watch implementation
         watch_class = get_custom_watch_obj_for_processor(apply_extras.get('processor'))
-        new_watch = watch_class(datastore_path=self.datastore_path, url=url)
+        new_watch = watch_class(datastore_path=self.datastore_path, __datastore=self.__data, url=url)
 
         new_uuid = new_watch.get('uuid')
 
@@ -842,10 +860,14 @@ class ChangeDetectionStore(DatastoreUpdatesMixin, FileSavingDataStore):
         # So we use the same model as a Watch
         with self.lock:
             from ..model import Tag
-            new_tag = Tag.model(datastore_path=self.datastore_path, default={
-                'title': title.strip(),
-                'date_created': int(time.time())
-            })
+            new_tag = Tag.model(
+                datastore_path=self.datastore_path,
+                __datastore=self.__data,
+                default={
+                    'title': title.strip(),
+                    'date_created': int(time.time())
+                }
+            )
 
             new_uuid = new_tag.get('uuid')
 
