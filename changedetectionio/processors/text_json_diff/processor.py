@@ -283,8 +283,9 @@ class ContentProcessor:
         content = html_tools.extract_json_as_string(content=raw_content, json_filter="json:$")
 
         # Sort JSON to avoid false alerts from reordering
+        # Don't sort JSON in this fork of Changedetection
         try:
-            content = json.dumps(json.loads(content), sort_keys=True, indent=2, ensure_ascii=False)
+            content = json.dumps(json.loads(content), sort_keys=False, indent=2, ensure_ascii=False)
         except Exception:
             # Might be malformed JSON, continue anyway
             pass

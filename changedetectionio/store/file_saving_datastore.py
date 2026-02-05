@@ -439,7 +439,7 @@ class FileSavingDataStore(DataStore):
         if HAS_ORJSON:
             json_bytes = orjson.dumps(watch_dict, option=orjson.OPT_SORT_KEYS)
         else:
-            json_str = json.dumps(watch_dict, sort_keys=True, ensure_ascii=False)
+            json_str = json.dumps(watch_dict, sort_keys=False, ensure_ascii=False)
             json_bytes = json_str.encode('utf-8')
 
         return hashlib.sha256(json_bytes).hexdigest()
