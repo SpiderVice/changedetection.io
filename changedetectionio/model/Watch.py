@@ -1,5 +1,29 @@
-import gc
-from copy import copy
+"""
+Watch domain model for change detection monitoring.
+
+ARCHITECTURE NOTE: Configuration Override Hierarchy
+===================================================
+
+This module implements Watch objects that inherit from dict (technical debt).
+The dream architecture would use Pydantic for:
+
+1. CHAIN RESOLUTION (Watch → Tag → Global Settings)
+   - Current: Manual resolution scattered across codebase
+   - Future: @computed_field properties with automatic resolution
+   - Examples: resolved_fetch_backend, resolved_restock_settings, etc.
+
+2. DATABASE BACKEND ABSTRACTION
+   - Current: Domain model tightly coupled to file-based JSON storage
+   - Future: Domain model (Pydantic) separate from persistence layer
+   - Enables: Easy migration to PostgreSQL, MongoDB, etc.
+
+3. TYPE SAFETY & VALIDATION
+   - Current: Dict access with no compile-time checks
+   - Future: Type hints, IDE autocomplete, validation at boundaries
+
+See class model docstring for detailed explanation and examples.
+See: processors/restock_diff/processor.py:184-192 for manual resolution example
+"""
 
 from blinker import signal
 from changedetectionio.validate_url import is_safe_valid_url
@@ -7,6 +31,7 @@ from changedetectionio.validate_url import is_safe_valid_url
 from changedetectionio.strtobool import strtobool
 from changedetectionio.jinja2_custom import render as jinja_render
 from . import watch_base
+from .persistence import EntityPersistenceMixin
 import os
 import re
 from pathlib import Path
@@ -103,22 +128,110 @@ def _brotli_save(contents, filepath, mode=None, fallback_uncompressed=False):
             raise Exception(f"Brotli compression failed for {filepath}: {e}")
 
 
-class model(watch_base):
+class model(EntityPersistenceMixin, watch_base):
+    """
+    Watch domain model for monitoring URL changes.
+
+    Inherits from watch_base (which inherits dict) - see watch_base docstring for field documentation.
+
+    ## Configuration Override Hierarchy (Chain Resolution)
+
+    The dream architecture uses a 3-level resolution chain:
+        Watch settings → Tag/Group settings → Global settings
+
+    Current implementation is MANUAL (see processor.py:184-192 for example):
+        - Processors manually check watch.get('field')
+        - Then loop through watch.tags to find first tag with overrides_watch=True
+        - Finally fall back to datastore['settings']['application']['field']
+
+    FUTURE: Pydantic-based chain resolution would enable:
+
+        ```python
+        # Instead of manual resolution in every processor:
+        restock_settings = watch.get('restock_settings', {})
+        for tag_uuid in watch.get('tags'):
+            tag = datastore['settings']['application']['tags'][tag_uuid]
+            if tag.get('overrides_watch'):
+                restock_settings = tag.get('restock_settings', {})
+                break
+
+        # Clean computed properties with automatic resolution:
+        @computed_field
+        def resolved_restock_settings(self) -> dict:
+            if self.restock_settings:
+                return self.restock_settings
+            for tag_uuid in self.tags:
+                tag = self._datastore.get_tag(tag_uuid)
+                if tag.overrides_watch and tag.restock_settings:
+                    return tag.restock_settings
+            return self._datastore.settings.restock_settings or {}
+
+        # Usage: watch.resolved_restock_settings (automatic, type-safe, tested once)
+        ```
+
+    Benefits of Pydantic migration:
+        1. Single source of truth for resolution logic (not scattered across processors)
+        2. Type safety + IDE autocomplete (watch.resolved_fetch_backend vs dict navigation)
+        3. Database backend abstraction (domain model separate from persistence)
+        4. Automatic validation at boundaries
+        5. Self-documenting via type hints
+        6. Easy to test resolution independently
+
+    Resolution chain examples that would benefit:
+        - fetch_backend: watch → tag → global (see get_fetch_backend property)
+        - notification_urls: watch → tag → global
+        - time_between_check: watch → global (see threshold_seconds)
+        - restock_settings: watch → tag (see processors/restock_diff/processor.py:184-192)
+        - history_snapshot_max_length: watch → global (see save_history_blob:550-556)
+        - All processor_config_* settings could use tag overrides
+
+    ## Database Backend Abstraction with Pydantic
+
+    Current: Watch inherits dict, tightly coupled to file-based JSON storage
+    Future: Domain model (Watch) separate from persistence layer
+
+        ```python
+        # Domain model (database-agnostic)
+        class Watch(BaseModel):
+            uuid: str
+            url: str
+            # ... validation, business logic
+
+        # Pluggable backends
+        class DataStoreBackend(ABC):
+            def save_watch(self, watch: Watch): ...
+            def load_watch(self, uuid: str) -> Watch: ...
+
+        # Implementations: FileBackend, MongoBackend, PostgresBackend, etc.
+        ```
+
+    This would enable:
+        - Easy migration between storage backends (file → postgres → mongodb)
+        - Pydantic handles serialization/deserialization automatically
+        - Domain logic stays clean (no storage concerns in Watch methods)
+
+    ## Migration Path
+
+    Given existing codebase, incremental migration recommended:
+        1. Create Pydantic models alongside existing dict-based models
+        2. Add .to_pydantic() / .from_pydantic() bridge methods
+        3. Gradually migrate code to use Pydantic models
+        4. Remove dict inheritance once migration complete
+
+    See: watch_base docstring for technical debt discussion
+    See: processors/restock_diff/processor.py:184-192 for manual resolution example
+    See: Watch.py:550-556 for nested dict navigation that would become watch.resolved_*
+    """
     __newest_history_key = None
     __history_n = 0
     jitter_seconds = 0
 
     def __init__(self, *arg, **kw):
-        self.__datastore_path = kw.get('datastore_path')
-        if kw.get('datastore_path'):
-            del kw['datastore_path']
-
-        self.__datastore = kw.get('__datastore')
-        if not self.__datastore:
+        # Validate __datastore before calling parent (Watch requires it)
+        if not kw.get('__datastore'):
             raise ValueError("Watch object requires '__datastore' reference - cannot access global settings without it")
-        if kw.get('__datastore'):
-            del kw['__datastore']
 
+        # Parent class (watch_base) handles __datastore and __datastore_path
         super(model, self).__init__(*arg, **kw)
 
         if kw.get('default'):
@@ -145,11 +258,6 @@ class model(watch_base):
     @property
     def has_unviewed(self):
         return int(self.newest_history_key) > int(self['last_viewed']) and self.__history_n >= 2
-
-    def ensure_data_dir_exists(self):
-        if not os.path.isdir(self.watch_data_dir):
-            logger.debug(f"> Creating data dir {self.watch_data_dir}")
-            os.mkdir(self.watch_data_dir)
 
     @property
     def link(self):
@@ -206,7 +314,8 @@ class model(watch_base):
 
         # JSON Data, Screenshots, Textfiles (history index and snapshots), HTML in the future etc
         # But preserve processor config files (they're configuration, not history data)
-        for item in pathlib.Path(str(self.watch_data_dir)).rglob("*.*"):
+        # Use glob not rglob here for safety.
+        for item in pathlib.Path(str(self.data_dir)).glob("*.*"):
             # Skip processor config files
             if item.name in processor_config_files:
                 continue
@@ -243,8 +352,30 @@ class model(watch_base):
     @property
     def get_fetch_backend(self):
         """
-        Like just using the `fetch_backend` key but there could be some logic
-        :return:
+        Get the fetch backend for this watch with special case handling.
+
+        CHAIN RESOLUTION OPPORTUNITY:
+        Currently returns watch.fetch_backend directly, but doesn't implement
+        Watch → Tag → Global resolution chain. With Pydantic:
+
+        @computed_field
+        def resolved_fetch_backend(self) -> str:
+            # Special case: PDFs always use html_requests
+            if self.is_pdf:
+                return 'html_requests'
+
+            # Watch override
+            if self.fetch_backend and self.fetch_backend != 'system':
+                return self.fetch_backend
+
+            # Tag override (first tag with overrides_watch=True wins)
+            for tag_uuid in self.tags:
+                tag = self._datastore.get_tag(tag_uuid)
+                if tag.overrides_watch and tag.fetch_backend:
+                    return tag.fetch_backend
+
+            # Global default
+            return self._datastore.settings.fetch_backend
         """
         # Maybe also if is_image etc?
         # This is because chrome/playwright wont render the PDF in the browser and we will just fetch it and use pdf2html to see the text.
@@ -293,11 +424,11 @@ class model(watch_base):
         tmp_history = {}
 
         # In the case we are only using the watch for processing without history
-        if not self.watch_data_dir:
+        if not self.data_dir:
             return []
 
         # Read the history file as a dict
-        fname = os.path.join(self.watch_data_dir, self.history_index_filename)
+        fname = os.path.join(self.data_dir, self.history_index_filename)
         if os.path.isfile(fname):
             logger.debug(f"Reading watch history index for {self.get('uuid')}")
             with open(fname, "r", encoding='utf-8') as f:
@@ -310,13 +441,13 @@ class model(watch_base):
                         # Cross-platform: check for any path separator (works on Windows and Unix)
                         if os.sep not in v and '/' not in v and '\\' not in v:
                             # Relative filename only, no path separators
-                            v = os.path.join(self.watch_data_dir, v)
+                            v = os.path.join(self.data_dir, v)
                         else:
                             # It's possible that they moved the datadir on older versions
                             # So the snapshot exists but is in a different path
                             # Cross-platform: use os.path.basename instead of split('/')
                             snapshot_fname = os.path.basename(v)
-                            proposed_new_path = os.path.join(self.watch_data_dir, snapshot_fname)
+                            proposed_new_path = os.path.join(self.data_dir, snapshot_fname)
                             if not os.path.exists(v) and os.path.exists(proposed_new_path):
                                 v = proposed_new_path
 
@@ -333,7 +464,7 @@ class model(watch_base):
 
     @property
     def has_history(self):
-        fname = os.path.join(self.watch_data_dir, self.history_index_filename)
+        fname = os.path.join(self.data_dir, self.history_index_filename)
         return os.path.isfile(fname)
 
     @property
@@ -439,7 +570,7 @@ class model(watch_base):
     def _write_atomic(self, dest, data, mode='wb'):
         """Write data atomically to dest using a temp file"""
         import tempfile
-        with tempfile.NamedTemporaryFile(mode, delete=False, dir=self.watch_data_dir) as tmp:
+        with tempfile.NamedTemporaryFile(mode, delete=False, dir=self.data_dir) as tmp:
             tmp.write(data)
             tmp.flush()
             os.fsync(tmp.fileno())
@@ -448,7 +579,7 @@ class model(watch_base):
 
     def history_trim(self, newest_n_items):
         from pathlib import Path
-
+        import gc
         # Sort by timestamp (key)
         sorted_items = sorted(self.history.items(), key=lambda x: int(x[0]))
 
@@ -465,7 +596,7 @@ class model(watch_base):
                 finally:
                     logger.debug(f"[{self.get('uuid')}] Deleted {item[1]} history snapshot")
         try:
-            dest = os.path.join(self.watch_data_dir, self.history_index_filename)
+            dest = os.path.join(self.data_dir, self.history_index_filename)
             output = "\r\n".join(
                 f"{k},{Path(v).name}"
                 for k, v in keep_part.items()
@@ -504,7 +635,7 @@ class model(watch_base):
                 ext = 'bin'
 
             snapshot_fname = f"{snapshot_id}.{ext}"
-            dest = os.path.join(self.watch_data_dir, snapshot_fname)
+            dest = os.path.join(self.data_dir, snapshot_fname)
             self._write_atomic(dest, contents)
             logger.trace(f"Saved binary snapshot as {snapshot_fname} ({len(contents)} bytes)")
 
@@ -514,7 +645,7 @@ class model(watch_base):
                 # Compressed text
                 import brotli
                 snapshot_fname = f"{snapshot_id}.txt.br"
-                dest = os.path.join(self.watch_data_dir, snapshot_fname)
+                dest = os.path.join(self.data_dir, snapshot_fname)
 
                 if not os.path.exists(dest):
                     try:
@@ -525,16 +656,16 @@ class model(watch_base):
                         logger.error(f"{self.get('uuid')} - Brotli compression failed: {e}")
                         # Fallback to uncompressed
                         snapshot_fname = f"{snapshot_id}.txt"
-                        dest = os.path.join(self.watch_data_dir, snapshot_fname)
+                        dest = os.path.join(self.data_dir, snapshot_fname)
                         self._write_atomic(dest, contents.encode('utf-8'))
             else:
                 # Plain text
                 snapshot_fname = f"{snapshot_id}.txt"
-                dest = os.path.join(self.watch_data_dir, snapshot_fname)
+                dest = os.path.join(self.data_dir, snapshot_fname)
                 self._write_atomic(dest, contents.encode('utf-8'))
 
         # Append to history.txt atomically
-        index_fname = os.path.join(self.watch_data_dir, self.history_index_filename)
+        index_fname = os.path.join(self.data_dir, self.history_index_filename)
         index_line = f"{timestamp},{snapshot_fname}\n"
 
         with open(index_fname, 'a', encoding='utf-8') as f:
@@ -546,11 +677,13 @@ class model(watch_base):
         self.__newest_history_key = timestamp
         self.__history_n += 1
 
-
-        maxlen = (
-                self.get('history_snapshot_max_length')
-                or (self.__datastore and self.__datastore['settings']['application'].get('history_snapshot_max_length'))
-        )
+        # MANUAL CHAIN RESOLUTION: Watch → Global
+        # With Pydantic, this would become: maxlen = watch.resolved_history_snapshot_max_length
+        # @computed_field def resolved_history_snapshot_max_length(self) -> Optional[int]:
+        #     if self.history_snapshot_max_length: return self.history_snapshot_max_length
+        #     if tag := self._get_override_tag(): return tag.history_snapshot_max_length
+        #     return self._datastore.settings.history_snapshot_max_length
+        maxlen = self.get('history_snapshot_max_length') or self.get_global_setting('application', 'history_snapshot_max_length')
 
         if maxlen and self.__history_n and self.__history_n > maxlen:
             self.history_trim(newest_n_items=maxlen)
@@ -607,7 +740,7 @@ class model(watch_base):
         return not local_lines.issubset(existing_history)
 
     def get_screenshot(self):
-        fname = os.path.join(self.watch_data_dir, "last-screenshot.png")
+        fname = os.path.join(self.data_dir, "last-screenshot.png")
         if os.path.isfile(fname):
             return fname
 
@@ -622,7 +755,7 @@ class model(watch_base):
         if not favicon_fname:
             return True
         try:
-            fname = next(iter(glob.glob(os.path.join(self.watch_data_dir, "favicon.*"))), None)
+            fname = next(iter(glob.glob(os.path.join(self.data_dir, "favicon.*"))), None)
             logger.trace(f"Favicon file maybe found at {fname}")
             if os.path.isfile(fname):
                 file_age = int(time.time() - os.path.getmtime(fname))
@@ -655,7 +788,7 @@ class model(watch_base):
             base = "favicon"
             extension = "ico"
 
-        fname = os.path.join(self.watch_data_dir, f"favicon.{extension}")
+        fname = os.path.join(self.data_dir, f"favicon.{extension}")
 
         try:
             # validate=True makes sure the string only contains valid base64 chars
@@ -702,7 +835,7 @@ class model(watch_base):
         import glob
 
         # Search for all favicon.* files
-        files = glob.glob(os.path.join(self.watch_data_dir, "favicon.*"))
+        files = glob.glob(os.path.join(self.data_dir, "favicon.*"))
 
         if not files:
             result = None
@@ -729,7 +862,7 @@ class model(watch_base):
         import os
         import time
 
-        thumbnail_path = os.path.join(self.watch_data_dir, "thumbnail.jpeg")
+        thumbnail_path = os.path.join(self.data_dir, "thumbnail.jpeg")
         top_trim = 500  # Pixels from top of screenshot to use
 
         screenshot_path = self.get_screenshot()
@@ -780,7 +913,7 @@ class model(watch_base):
             return None
 
     def __get_file_ctime(self, filename):
-        fname = os.path.join(self.watch_data_dir, filename)
+        fname = os.path.join(self.data_dir, filename)
         if os.path.isfile(fname):
             return int(os.path.getmtime(fname))
         return False
@@ -805,14 +938,9 @@ class model(watch_base):
     def snapshot_error_screenshot_ctime(self):
         return self.__get_file_ctime('last-error-screenshot.png')
 
-    @property
-    def watch_data_dir(self):
-        # The base dir of the watch data
-        return os.path.join(self.__datastore_path, self['uuid']) if self.__datastore_path else None
-
     def get_error_text(self):
         """Return the text saved from a previous request that resulted in a non-200 error"""
-        fname = os.path.join(self.watch_data_dir, "last-error.txt")
+        fname = os.path.join(self.data_dir, "last-error.txt")
         if os.path.isfile(fname):
             with open(fname, 'r', encoding='utf-8') as f:
                 return f.read()
@@ -820,7 +948,7 @@ class model(watch_base):
 
     def get_error_snapshot(self):
         """Return path to the screenshot that resulted in a non-200 error"""
-        fname = os.path.join(self.watch_data_dir, "last-error-screenshot.png")
+        fname = os.path.join(self.data_dir, "last-error-screenshot.png")
         if os.path.isfile(fname):
             return fname
         return False
@@ -843,6 +971,37 @@ class model(watch_base):
 
     def toggle_mute(self):
         self['notification_muted'] ^= True
+
+    def _get_commit_data(self):
+        """
+        Prepare watch data for commit.
+
+        Excludes processor_config_* keys (stored in separate files).
+        Normalizes browser_steps to empty list if no meaningful steps.
+        """
+        import copy
+
+        # Get base snapshot with lock
+        lock = self._datastore.lock if self._datastore and hasattr(self._datastore, 'lock') else None
+
+        if lock:
+            with lock:
+                snapshot = dict(self)
+        else:
+            snapshot = dict(self)
+
+        # Exclude processor config keys (stored separately)
+        watch_dict = {k: copy.deepcopy(v) for k, v in snapshot.items() if not k.startswith('processor_config_')}
+
+        # Normalize browser_steps: if no meaningful steps, save as empty list
+        if not self.has_browser_steps:
+            watch_dict['browser_steps'] = []
+
+        return watch_dict
+
+    # _save_to_disk() method provided by EntityPersistenceMixin
+    # commit() method inherited from watch_base
+
 
     def extra_notification_token_values(self):
         # Used for providing extra tokens
@@ -873,7 +1032,7 @@ class model(watch_base):
                         if not csv_writer:
                             # A file on the disk can be transferred much faster via flask than a string reply
                             csv_output_filename = f"report-{self.get('uuid')}.csv"
-                            f = open(os.path.join(self.watch_data_dir, csv_output_filename), 'w')
+                            f = open(os.path.join(self.data_dir, csv_output_filename), 'w')
                             # @todo some headers in the future
                             #fieldnames = ['Epoch seconds', 'Date']
                             csv_writer = csv.writer(f,
@@ -915,7 +1074,7 @@ class model(watch_base):
 
     def save_error_text(self, contents):
         self.ensure_data_dir_exists()
-        target_path = os.path.join(self.watch_data_dir, "last-error.txt")
+        target_path = os.path.join(self.data_dir, "last-error.txt")
         with open(target_path, 'w', encoding='utf-8') as f:
             f.write(contents)
 
@@ -924,9 +1083,9 @@ class model(watch_base):
         import zlib
 
         if as_error:
-            target_path = os.path.join(str(self.watch_data_dir), "elements-error.deflate")
+            target_path = os.path.join(str(self.data_dir), "elements-error.deflate")
         else:
-            target_path = os.path.join(str(self.watch_data_dir), "elements.deflate")
+            target_path = os.path.join(str(self.data_dir), "elements.deflate")
 
         self.ensure_data_dir_exists()
 
@@ -941,9 +1100,9 @@ class model(watch_base):
     def save_screenshot(self, screenshot: bytes, as_error=False):
 
         if as_error:
-            target_path = os.path.join(self.watch_data_dir, "last-error-screenshot.png")
+            target_path = os.path.join(self.data_dir, "last-error-screenshot.png")
         else:
-            target_path = os.path.join(self.watch_data_dir, "last-screenshot.png")
+            target_path = os.path.join(self.data_dir, "last-screenshot.png")
 
         self.ensure_data_dir_exists()
 
@@ -954,7 +1113,7 @@ class model(watch_base):
 
     def get_last_fetched_text_before_filters(self):
         import brotli
-        filepath = os.path.join(self.watch_data_dir, 'last-fetched.br')
+        filepath = os.path.join(self.data_dir, 'last-fetched.br')
 
         if not os.path.isfile(filepath) or os.path.getsize(filepath) == 0:
             # If a previous attempt doesnt yet exist, just snarf the previous snapshot instead
@@ -969,13 +1128,13 @@ class model(watch_base):
 
     def save_last_text_fetched_before_filters(self, contents):
         import brotli
-        filepath = os.path.join(self.watch_data_dir, 'last-fetched.br')
+        filepath = os.path.join(self.data_dir, 'last-fetched.br')
         _brotli_save(contents, filepath, mode=brotli.MODE_TEXT, fallback_uncompressed=False)
 
     def save_last_fetched_html(self, timestamp, contents):
         self.ensure_data_dir_exists()
         snapshot_fname = f"{timestamp}.html.br"
-        filepath = os.path.join(self.watch_data_dir, snapshot_fname)
+        filepath = os.path.join(self.data_dir, snapshot_fname)
         _brotli_save(contents, filepath, mode=None, fallback_uncompressed=True)
         self._prune_last_fetched_html_snapshots()
 
@@ -983,7 +1142,7 @@ class model(watch_base):
         import brotli
 
         snapshot_fname = f"{timestamp}.html.br"
-        filepath = os.path.join(self.watch_data_dir, snapshot_fname)
+        filepath = os.path.join(self.data_dir, snapshot_fname)
         if os.path.isfile(filepath):
             with open(filepath, 'rb') as f:
                 return (brotli.decompress(f.read()).decode('utf-8'))
@@ -998,7 +1157,7 @@ class model(watch_base):
 
         for index, timestamp in enumerate(dates):
             snapshot_fname = f"{timestamp}.html.br"
-            filepath = os.path.join(self.watch_data_dir, snapshot_fname)
+            filepath = os.path.join(self.data_dir, snapshot_fname)
 
             # Keep only the first 2
             if index > 1 and os.path.isfile(filepath):
@@ -1009,7 +1168,7 @@ class model(watch_base):
     def get_browsersteps_available_screenshots(self):
         "For knowing which screenshots are available to show the user in BrowserSteps UI"
         available = []
-        for f in Path(self.watch_data_dir).glob('step_before-*.jpeg'):
+        for f in Path(self.data_dir).glob('step_before-*.jpeg'):
             step_n=re.search(r'step_before-(\d+)', f.name)
             if step_n:
                 available.append(step_n.group(1))

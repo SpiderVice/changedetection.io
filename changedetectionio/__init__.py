@@ -112,9 +112,9 @@ def sigshutdown_handler(_signo, _stack_frame):
         from changedetectionio.flask_app import update_q, notification_q
         update_q.close()
         notification_q.close()
-        logger.debug("Janus queues closed successfully")
+        logger.debug("Queues closed successfully")
     except Exception as e:
-        logger.critical(f"CRITICAL: Failed to close janus queues: {e}")
+        logger.critical(f"CRITICAL: Failed to close queues: {e}")
     
     # Shutdown socketio server fast
     from changedetectionio.flask_app import socketio_server
@@ -124,13 +124,9 @@ def sigshutdown_handler(_signo, _stack_frame):
         except Exception as e:
             logger.error(f"Error shutting down Socket.IO server: {str(e)}")
     
-    # Save data quickly - force immediate save using abstract method
-    try:
-        datastore.force_save_all()
-        logger.success('Fast sync to storage complete.')
-    except Exception as e:
-        logger.error(f"Error syncing to storage: {str(e)}")
-    
+    # With immediate persistence, all data is already saved
+    logger.success('All data already persisted (immediate commits enabled).')
+
     sys.exit()
 
 def print_help():
@@ -186,7 +182,6 @@ def main():
     from changedetectionio.flask_app import changedetection_app
 
     datastore_path = None
-    do_cleanup = False
     # Set a default logger level
     logger_level = 'DEBUG'
     include_default_watches = True
@@ -269,7 +264,7 @@ def main():
         i += 1
 
     try:
-        opts, args = getopt.getopt(cleaned_argv[1:], "6Ccsd:h:p:l:P:", "port")
+        opts, args = getopt.getopt(cleaned_argv[1:], "6Csd:h:p:l:P:", "port")
     except getopt.GetoptError as e:
         print_help()
         print(f'Error: {e}')
@@ -296,10 +291,6 @@ def main():
 
         if opt == '-d':
             datastore_path = arg
-
-        # Cleanup (remove text files that arent in the index)
-        if opt == '-c':
-            do_cleanup = True
 
         # Create the datadir if it doesnt exist
         if opt == '-C':
@@ -606,10 +597,6 @@ def main():
     else:
         logger.info("SIGUSR1 handler only registered on Linux, skipped.")
 
-    # Go into cleanup mode
-    if do_cleanup:
-        datastore.remove_unused_snapshots()
-
     app.config['datastore_path'] = datastore_path
 
 
@@ -618,7 +605,7 @@ def main():
         return dict(right_sticky="v{}".format(datastore.data['version_tag']),
                     new_version_available=app.config['NEW_VERSION_AVAILABLE'],
                     has_password=datastore.data['settings']['application']['password'] != False,
-                    socket_io_enabled=datastore.data['settings']['application']['ui'].get('socket_io_enabled', True),
+                    socket_io_enabled=datastore.data['settings']['application'].get('ui', {}).get('socket_io_enabled', True),
                     all_paused=datastore.data['settings']['application'].get('all_paused', False),
                     all_muted=datastore.data['settings']['application'].get('all_muted', False)
                     )

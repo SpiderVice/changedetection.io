@@ -84,15 +84,19 @@ class Watch(Resource):
             return "OK", 200
         if request.args.get('paused', '') == 'paused':
             watch_obj.pause()
+            watch_obj.commit()
             return "OK", 200
         elif request.args.get('paused', '') == 'unpaused':
             watch_obj.unpause()
+            watch_obj.commit()
             return "OK", 200
         if request.args.get('muted', '') == 'muted':
             watch_obj.mute()
+            watch_obj.commit()
             return "OK", 200
         elif request.args.get('muted', '') == 'unmuted':
             watch_obj.unmute()
+            watch_obj.commit()
             return "OK", 200
 
         # Return without history, get that via another API call
@@ -173,6 +177,7 @@ class Watch(Resource):
 
         # Update watch with regular (non-processor-config) fields
         watch.update(json_data)
+        watch.commit()
 
         # Save processor config to JSON file
         processors.save_processor_config(self.datastore, uuid, processor_config_data)
@@ -369,10 +374,10 @@ class WatchFavicon(Resource):
         favicon_filename = watch.get_favicon_filename()
         if favicon_filename:
             # Use cached MIME type detection
-            filepath = os.path.join(watch.watch_data_dir, favicon_filename)
+            filepath = os.path.join(watch.data_dir, favicon_filename)
             mime = get_favicon_mime_type(filepath)
 
-            response = make_response(send_from_directory(watch.watch_data_dir, favicon_filename))
+            response = make_response(send_from_directory(watch.data_dir, favicon_filename))
             response.headers['Content-type'] = mime
             response.headers['Cache-Control'] = 'max-age=300, must-revalidate'  # Cache for 5 minutes, then revalidate
             return response
@@ -419,7 +424,13 @@ class CreateWatch(Resource):
             except ValidationError as e:
                 return str(e), 400
 
+        # Handle processor-config-* fields separately (save to JSON, not watch)
+        from changedetectionio import processors
+
         extras = copy.deepcopy(json_data)
+
+        # Extract and remove processor config fields from extras
+        processor_config_data = processors.extract_processor_config_from_form_data(extras)
 
         # Because we renamed 'tag' to 'tags' but don't want to change the API (can do this in v2 of the API)
         tags = None
@@ -430,6 +441,10 @@ class CreateWatch(Resource):
         del extras['url']
 
         new_uuid = self.datastore.add_watch(url=url, extras=extras, tag=tags)
+
+        # Save processor config to separate JSON file
+        if new_uuid and processor_config_data:
+            processors.save_processor_config(self.datastore, new_uuid, processor_config_data)
         if new_uuid:
 # Dont queue because the scheduler will check that it hasnt been checked before anyway
 #            worker_pool.queue_item_async_safe(self.update_q, queuedWatchMetaData.PrioritizedItem(priority=1, item={'uuid': new_uuid}))

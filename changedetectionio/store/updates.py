@@ -29,6 +29,7 @@ def create_backup_tarball(datastore_path, update_number):
 
     Includes:
     - All {uuid}/watch.json files
+    - All {uuid}/tag.json files
     - changedetection.json (settings, if it exists)
     - url-watches.json (legacy format, if it exists)
     - Directory structure preserved
@@ -44,7 +45,7 @@ def create_backup_tarball(datastore_path, update_number):
     To restore from a backup:
         cd /path/to/datastore
         tar -xzf before-update-N-timestamp.tar.gz
-    This will restore all watch.json files and settings to their pre-update state.
+    This will restore all watch.json and tag.json files and settings to their pre-update state.
     """
     timestamp = int(time.time())
     backup_filename = f"before-update-{update_number}-{timestamp}.tar.gz"
@@ -66,9 +67,10 @@ def create_backup_tarball(datastore_path, update_number):
                 tar.add(url_watches_json, arcname="url-watches.json")
                 logger.debug("Added url-watches.json to backup")
 
-            # Backup all watch directories with their watch.json files
+            # Backup all watch/tag directories with their JSON files
             # This preserves the UUID directory structure
             watch_count = 0
+            tag_count = 0
             for entry in os.listdir(datastore_path):
                 entry_path = os.path.join(datastore_path, entry)
 
@@ -80,17 +82,22 @@ def create_backup_tarball(datastore_path, update_number):
                 if entry.startswith('.') or entry.startswith('before-update-'):
                     continue
 
-                # Check if this directory has a watch.json (indicates it's a watch UUID directory)
+                # Backup watch.json if exists
                 watch_json = os.path.join(entry_path, "watch.json")
                 if os.path.isfile(watch_json):
-                    # Add the watch.json file preserving directory structure
                     tar.add(watch_json, arcname=f"{entry}/watch.json")
                     watch_count += 1
 
                     if watch_count % 100 == 0:
                         logger.debug(f"Backed up {watch_count} watch.json files...")
 
-            logger.success(f"Backup created: {backup_filename} ({watch_count} watches)")
+                # Backup tag.json if exists
+                tag_json = os.path.join(entry_path, "tag.json")
+                if os.path.isfile(tag_json):
+                    tar.add(tag_json, arcname=f"{entry}/tag.json")
+                    tag_count += 1
+
+            logger.success(f"Backup created: {backup_filename} ({watch_count} watches, {tag_count} tags)")
             return backup_path
 
     except Exception as e:
@@ -147,10 +154,10 @@ class DatastoreUpdatesMixin:
         2. For each update > current schema version:
            - Create backup of datastore
            - Run update method
-           - Update schema version
-           - Mark settings and watches dirty
+           - Update schema version and commit settings
+           - Commit all watches and tags
         3. If any update fails, stop processing
-        4. Save all changes immediately
+        4. All changes saved via individual .commit() calls
         """
         updates_available = self.get_updates_available()
 
@@ -168,7 +175,7 @@ class DatastoreUpdatesMixin:
                     latest_update = updates_available[-1] if updates_available else 0
                     logger.info(f"No schema version found and no watches exist - assuming fresh install, setting schema_version to {latest_update}")
                     self.data['settings']['application']['schema_version'] = latest_update
-                    self.mark_settings_dirty()
+                    self.commit()
                     return  # No updates needed for fresh install
                 else:
                     # Has watches but no schema version - likely old datastore, run all updates
@@ -199,26 +206,11 @@ class DatastoreUpdatesMixin:
                     # Don't run any more updates
                     return
                 else:
-                    # Bump the version, important
+                    # Bump the version
                     self.data['settings']['application']['schema_version'] = update_n
-                    self.mark_settings_dirty()
+                    self.commit()
 
-                    # CRITICAL: Mark all watches as dirty so changes are persisted
-                    # Most updates modify watches, and in the new individual watch.json structure,
-                    # we need to ensure those changes are saved
-                    logger.info(f"Marking all {len(self.data['watching'])} watches as dirty after update_{update_n} (so that it saves them to disk)")
-                    for uuid in self.data['watching'].keys():
-                        self.mark_watch_dirty(uuid)
-
-                    # Save changes immediately after each update (more resilient than batching)
-                    logger.critical(f"Saving all changes after update_{update_n}")
-                    try:
-                        self._save_dirty_items()
-                        logger.success(f"Update {update_n} changes saved successfully")
-                    except Exception as e:
-                        logger.error(f"Failed to save update_{update_n} changes: {e}")
-                        # Don't raise - update already ran, but changes might not be persisted
-                        # The update will try to run again on next startup
+                    logger.success(f"Update {update_n} completed")
 
                     # Track which updates ran
                     updates_ran.append(update_n)
@@ -468,6 +460,14 @@ class DatastoreUpdatesMixin:
                 del self.data['watching'][uuid]['extract_title_as_title']
 
         if self.data['settings']['application'].get('extract_title_as_title'):
+            # Ensure 'ui' key exists (defensive for edge cases where base_config merge didn't happen)
+            if 'ui' not in self.data['settings']['application']:
+                self.data['settings']['application']['ui'] = {
+                    'use_page_title_in_list': True,
+                    'open_diff_in_new_tab': True,
+                    'socket_io_enabled': True,
+                    'favicons_enabled': True
+                }
             self.data['settings']['application']['ui']['use_page_title_in_list'] = self.data['settings']['application'].get('extract_title_as_title')
 
     def update_21(self):
@@ -648,23 +648,6 @@ class DatastoreUpdatesMixin:
         logger.critical("Reloading datastore from new format...")
         self._load_state() # Includes load_watches
         logger.success("Datastore reloaded from new format successfully")
-
-
-        # Verify all watches have hashes after migration
-        missing_hashes = [uuid for uuid in self.data['watching'].keys() if uuid not in self._watch_hashes]
-        if missing_hashes:
-            logger.error(f"WARNING: {len(missing_hashes)} watches missing hashes after migration: {missing_hashes[:5]}")
-        else:
-            logger.success(f"All {len(self.data['watching'])} watches have valid hashes after migration")
-
-        # Set schema version to latest available update
-        # This prevents re-running updates and re-marking all watches as dirty
-        updates_available = self.get_updates_available()
-        latest_schema = updates_available[-1] if updates_available else 26
-        self.data['settings']['application']['schema_version'] = latest_schema
-        self.mark_settings_dirty()
-        logger.info(f"Set schema_version to {latest_schema} (migration complete, all watches already saved)")
-
         logger.critical("=" * 80)
         logger.critical("MIGRATION COMPLETED SUCCESSFULLY!")
         logger.critical("=" * 80)
@@ -684,3 +667,75 @@ class DatastoreUpdatesMixin:
 
     def update_26(self):
         self.migrate_legacy_db_format()
+
+    def update_28(self):
+        """
+        Migrate tags to individual tag.json files.
+
+        Tags are currently saved only in changedetection.json (settings).
+        This migration ALSO saves them to individual {uuid}/tag.json files,
+        similar to how watches are stored (dual storage).
+
+        Benefits:
+        - Allows atomic tag updates without rewriting entire settings
+        - Enables independent tag versioning/backup
+        - Maintains backwards compatibility (tags stay in settings too)
+        """
+        logger.critical("=" * 80)
+        logger.critical("Running migration: Individual tag persistence (update_28)")
+        logger.critical("Creating individual tag.json files (tags remain in settings too)")
+        logger.critical("=" * 80)
+
+        tags = self.data['settings']['application'].get('tags', {})
+        tag_count = len(tags)
+
+        if tag_count == 0:
+            logger.info("No tags found, skipping migration")
+            return
+
+        logger.info(f"Migrating {tag_count} tags to individual tag.json files...")
+
+        saved_count = 0
+        failed_count = 0
+
+        for uuid, tag_data in tags.items():
+            try:
+                # Force save as tag.json (not watch.json) even if object is corrupted
+                from changedetectionio.store.file_saving_datastore import save_entity_atomic
+                import os
+
+                tag_dir = os.path.join(self.datastore_path, uuid)
+                os.makedirs(tag_dir, exist_ok=True)
+
+                # Convert to dict if it's an object
+                tag_dict = dict(tag_data) if hasattr(tag_data, '__iter__') else tag_data
+
+                # Save explicitly as tag.json
+                save_entity_atomic(
+                    tag_dir,
+                    uuid,
+                    tag_dict,
+                    filename='tag.json',
+                    entity_type='tag',
+                    max_size_mb=1
+                )
+                saved_count += 1
+
+                if saved_count % 10 == 0:
+                    logger.info(f"  Progress: {saved_count}/{tag_count} tags migrated...")
+
+            except Exception as e:
+                logger.error(f"Failed to save tag {uuid} ({tag_data.get('title', 'unknown')}): {e}")
+                failed_count += 1
+
+        if failed_count > 0:
+            logger.warning(f"Migration complete: {saved_count} tags saved, {failed_count} tags FAILED")
+        else:
+            logger.success(f"Migration complete: {saved_count} tags saved to individual tag.json files")
+
+        # Tags remain in settings for backwards compatibility AND easy access
+        # On next load, _load_tags() will read from tag.json files and merge with settings
+        logger.info("Tags saved to both settings AND individual tag.json files")
+        logger.info("Future tag edits will update both locations (dual storage)")
+
+        logger.critical("=" * 80)

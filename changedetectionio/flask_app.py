@@ -266,6 +266,47 @@ def _jinja2_filter_seconds_precise(timestamp):
 
     return format(int(time.time()-timestamp), ',d')
 
+@app.template_filter('format_duration')
+def _jinja2_filter_format_duration(seconds):
+    """Format a duration in seconds into human readable string like '5 days, 3 hours, 30 minutes'"""
+    from datetime import timedelta
+
+    if not seconds or seconds < 0:
+        return gettext('0 seconds')
+
+    td = timedelta(seconds=int(seconds))
+
+    # Calculate components
+    years = td.days // 365
+    remaining_days = td.days % 365
+    months = remaining_days // 30
+    remaining_days = remaining_days % 30
+    weeks = remaining_days // 7
+    days = remaining_days % 7
+
+    hours = td.seconds // 3600
+    minutes = (td.seconds % 3600) // 60
+    secs = td.seconds % 60
+
+    # Build parts list
+    parts = []
+    if years > 0:
+        parts.append(f"{years} {gettext('year') if years == 1 else gettext('years')}")
+    if months > 0:
+        parts.append(f"{months} {gettext('month') if months == 1 else gettext('months')}")
+    if weeks > 0:
+        parts.append(f"{weeks} {gettext('week') if weeks == 1 else gettext('weeks')}")
+    if days > 0:
+        parts.append(f"{days} {gettext('day') if days == 1 else gettext('days')}")
+    if hours > 0:
+        parts.append(f"{hours} {gettext('hour') if hours == 1 else gettext('hours')}")
+    if minutes > 0:
+        parts.append(f"{minutes} {gettext('minute') if minutes == 1 else gettext('minutes')}")
+    if secs > 0 or not parts:
+        parts.append(f"{secs} {gettext('second') if secs == 1 else gettext('seconds')}")
+
+    return ", ".join(parts)
+
 @app.template_filter('fetcher_status_icons')
 def _jinja2_filter_fetcher_status_icons(fetcher_name):
     """Get status icon HTML for a given fetcher.
@@ -703,10 +744,10 @@ def changedetection_app(config=None, datastore_o=None):
             favicon_filename = watch.get_favicon_filename()
             if favicon_filename:
                 # Use cached MIME type detection
-                filepath = os.path.join(watch.watch_data_dir, favicon_filename)
+                filepath = os.path.join(watch.data_dir, favicon_filename)
                 mime = get_favicon_mime_type(filepath)
 
-                response = make_response(send_from_directory(watch.watch_data_dir, favicon_filename))
+                response = make_response(send_from_directory(watch.data_dir, favicon_filename))
                 response.headers['Content-type'] = mime
                 response.headers['Cache-Control'] = 'max-age=300, must-revalidate'  # Cache for 5 minutes, then revalidate
                 return response
@@ -807,7 +848,7 @@ def changedetection_app(config=None, datastore_o=None):
     app.register_blueprint(watchlist.construct_blueprint(datastore=datastore, update_q=update_q, queuedWatchMetaData=queuedWatchMetaData), url_prefix='')
 
     # Initialize Socket.IO server conditionally based on settings
-    socket_io_enabled = datastore.data['settings']['application']['ui'].get('socket_io_enabled', True)
+    socket_io_enabled = datastore.data['settings']['application'].get('ui', {}).get('socket_io_enabled', True)
     if socket_io_enabled and app.config.get('batch_mode'):
         socket_io_enabled = False
     if socket_io_enabled:

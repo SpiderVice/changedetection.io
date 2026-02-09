@@ -47,7 +47,7 @@ def create_backup(datastore_path, watches: dict):
 
         # Add any data in the watch data directory.
         for uuid, w in watches.items():
-            for f in Path(w.watch_data_dir).glob('*'):
+            for f in Path(w.data_dir).glob('*'):
                 zipObj.write(f,
                              # Use the full path to access the file, but make the file 'relative' in the Zip.
                              arcname=os.path.join(f.parts[-2], f.parts[-1]),
@@ -102,8 +102,7 @@ def construct_blueprint(datastore: ChangeDetectionStore):
             flash(gettext("Maximum number of backups reached, please remove some"), "error")
             return redirect(url_for('backups.index'))
 
-        # Be sure we're written fresh - force immediate save using abstract method
-        datastore.force_save_all()
+        # With immediate persistence, all data is already saved
         zip_thread = threading.Thread(
             target=create_backup,
             args=(datastore.datastore_path, datastore.data.get("watching")),

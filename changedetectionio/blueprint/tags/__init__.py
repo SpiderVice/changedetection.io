@@ -57,8 +57,10 @@ def construct_blueprint(datastore: ChangeDetectionStore):
     @tags_blueprint.route("/mute/<string:uuid>", methods=['GET'])
     @login_optionally_required
     def mute(uuid):
-        if datastore.data['settings']['application']['tags'].get(uuid):
-            datastore.data['settings']['application']['tags'][uuid]['notification_muted'] = not datastore.data['settings']['application']['tags'][uuid]['notification_muted']
+        tag = datastore.data['settings']['application']['tags'].get(uuid)
+        if tag:
+            tag['notification_muted'] = not tag['notification_muted']
+            tag.commit()
         return redirect(url_for('tags.tags_overview_page'))
 
     @tags_blueprint.route("/delete/<string:uuid>", methods=['GET'])
@@ -68,6 +70,17 @@ def construct_blueprint(datastore: ChangeDetectionStore):
         if datastore.data['settings']['application']['tags'].get(uuid):
             del datastore.data['settings']['application']['tags'][uuid]
 
+        # Delete tag.json file if it exists
+        import os
+        tag_dir = os.path.join(datastore.datastore_path, uuid)
+        tag_json = os.path.join(tag_dir, "tag.json")
+        if os.path.exists(tag_json):
+            try:
+                os.unlink(tag_json)
+                logger.info(f"Deleted tag.json for tag {uuid}")
+            except Exception as e:
+                logger.error(f"Failed to delete tag.json for tag {uuid}: {e}")
+
         # Remove tag from all watches in background thread to avoid blocking
         def remove_tag_background(tag_uuid):
             """Background thread to remove tag from watches - discarded after completion."""
@@ -76,6 +89,7 @@ def construct_blueprint(datastore: ChangeDetectionStore):
                 for watch_uuid, watch in datastore.data['watching'].items():
                     if watch.get('tags') and tag_uuid in watch['tags']:
                         watch['tags'].remove(tag_uuid)
+                        watch.commit()
                         removed_count += 1
                 logger.info(f"Background: Tag {tag_uuid} removed from {removed_count} watches")
             except Exception as e:
@@ -98,6 +112,7 @@ def construct_blueprint(datastore: ChangeDetectionStore):
                 for watch_uuid, watch in datastore.data['watching'].items():
                     if watch.get('tags') and tag_uuid in watch['tags']:
                         watch['tags'].remove(tag_uuid)
+                        watch.commit()
                         unlinked_count += 1
                 logger.info(f"Background: Tag {tag_uuid} unlinked from {unlinked_count} watches")
             except Exception as e:
@@ -112,6 +127,17 @@ def construct_blueprint(datastore: ChangeDetectionStore):
     @tags_blueprint.route("/delete_all", methods=['GET'])
     @login_optionally_required
     def delete_all():
+        # Delete all tag.json files
+        import os
+        for tag_uuid in list(datastore.data['settings']['application']['tags'].keys()):
+            tag_dir = os.path.join(datastore.datastore_path, tag_uuid)
+            tag_json = os.path.join(tag_dir, "tag.json")
+            if os.path.exists(tag_json):
+                try:
+                    os.unlink(tag_json)
+                except Exception as e:
+                    logger.error(f"Failed to delete tag.json for tag {tag_uuid}: {e}")
+
         # Clear all tags from settings immediately
         datastore.data['settings']['application']['tags'] = {}
 
@@ -122,6 +148,7 @@ def construct_blueprint(datastore: ChangeDetectionStore):
             try:
                 for watch_uuid, watch in datastore.data['watching'].items():
                     watch['tags'] = []
+                    watch.commit()
                     cleared_count += 1
                 logger.info(f"Background: Cleared tags from {cleared_count} watches")
             except Exception as e:
@@ -202,10 +229,10 @@ def construct_blueprint(datastore: ChangeDetectionStore):
         if uuid == 'first':
             uuid = list(datastore.data['settings']['application']['tags'].keys()).pop()
 
-        default = datastore.data['settings']['application']['tags'].get(uuid)
+        tag = datastore.data['settings']['application']['tags'].get(uuid)
 
         form = group_restock_settings_form(formdata=request.form if request.method == 'POST' else None,
-                               data=default,
+                               data=tag,
                                extra_notification_tokens=datastore.get_unique_notification_tokens_available()
                                )
         # @todo subclass form so validation works
@@ -214,9 +241,9 @@ def construct_blueprint(datastore: ChangeDetectionStore):
 #                flash(','.join(l), 'error')
 #           return redirect(url_for('tags.form_tag_edit_submit', uuid=uuid))
 
-        datastore.data['settings']['application']['tags'][uuid].update(form.data)
-        datastore.data['settings']['application']['tags'][uuid]['processor'] = 'restock_diff'
-        datastore.needs_write_urgent = True
+        tag.update(form.data)
+        tag['processor'] = 'restock_diff'
+        tag.commit()
         flash(gettext("Updated"))
 
         return redirect(url_for('tags.tags_overview_page'))
