@@ -50,6 +50,7 @@ body.difference-page {
   background: var(--color-background);
   padding: 1rem;
   border-radius: 5px;
+  max-width: 90%;
 
   @media (min-width: 767px) {
     min-width: 50%;
