@@ -489,6 +489,7 @@ def test_api_import(client, live_server, measure_memory_usage, datastore_path):
 
     api_key = live_server.app.config['DATASTORE'].data['settings']['application'].get('api_access_token')
 
+    # Test 1: Basic import with tag
     res = client.post(
         url_for("import") + "?tag=import-test",
         data='https://website1.com\r\nhttps://website2.com',
@@ -506,6 +507,209 @@ def test_api_import(client, live_server, measure_memory_usage, datastore_path):
     # Should see the new tag in the tag/groups list
     res = client.get(url_for('tags.tags_overview_page'))
     assert b'import-test' in res.data
+
+    # Test 2: Import with watch configuration fields (issue #3845)
+    # Test string field (include_filters), boolean (paused), and processor
+    import urllib.parse
+    params = urllib.parse.urlencode({
+        'tag': 'config-test',
+        'include_filters': 'div.content',
+        'paused': 'true',
+        'processor': 'text_json_diff',
+        'title': 'Imported with Config'
+    })
+
+    res = client.post(
+        url_for("import") + "?" + params,
+        data='https://website3.com',
+        headers={'x-api-key': api_key},
+        follow_redirects=True
+    )
+
+    assert res.status_code == 200
+    assert len(res.json) == 1
+    uuid = res.json[0]
+
+    # Verify the configuration was applied
+    watch = live_server.app.config['DATASTORE'].data['watching'][uuid]
+    assert watch['include_filters'] == ['div.content'], "include_filters should be set as array"
+    assert watch['paused'] == True, "paused should be True"
+    assert watch['processor'] == 'text_json_diff', "processor should be set"
+    assert watch['title'] == 'Imported with Config', "title should be set"
+
+    # Test 3: Import with array field (notification_urls) - using valid Apprise format
+    params = urllib.parse.urlencode({
+        'tag': 'notification-test',
+        'notification_urls': 'mailto://test@example.com,mailto://admin@example.com'
+    })
+
+    res = client.post(
+        url_for("import") + "?" + params,
+        data='https://website4.com',
+        headers={'x-api-key': api_key},
+        follow_redirects=True
+    )
+
+    assert res.status_code == 200
+    uuid = res.json[0]
+    watch = live_server.app.config['DATASTORE'].data['watching'][uuid]
+    assert 'mailto://test@example.com' in watch['notification_urls'], "notification_urls should contain first email"
+    assert 'mailto://admin@example.com' in watch['notification_urls'], "notification_urls should contain second email"
+
+    # Test 4: Import with object field (time_between_check)
+    import json
+    time_config = json.dumps({"hours": 2, "minutes": 30})
+    params = urllib.parse.urlencode({
+        'tag': 'schedule-test',
+        'time_between_check': time_config
+    })
+
+    res = client.post(
+        url_for("import") + "?" + params,
+        data='https://website5.com',
+        headers={'x-api-key': api_key},
+        follow_redirects=True
+    )
+
+    assert res.status_code == 200
+    uuid = res.json[0]
+    watch = live_server.app.config['DATASTORE'].data['watching'][uuid]
+    assert watch['time_between_check']['hours'] == 2, "time_between_check hours should be 2"
+    assert watch['time_between_check']['minutes'] == 30, "time_between_check minutes should be 30"
+
+    # Test 5: Import with invalid processor (should fail)
+    res = client.post(
+        url_for("import") + "?processor=invalid_processor",
+        data='https://website6.com',
+        headers={'x-api-key': api_key},
+        follow_redirects=True
+    )
+
+    assert res.status_code == 400, "Should reject invalid processor"
+    assert b"Invalid processor" in res.data, "Error message should mention invalid processor"
+
+    # Test 6: Import with invalid field (should fail)
+    res = client.post(
+        url_for("import") + "?unknown_field=value",
+        data='https://website7.com',
+        headers={'x-api-key': api_key},
+        follow_redirects=True
+    )
+
+    assert res.status_code == 400, "Should reject unknown field"
+    assert b"Unknown watch configuration parameter" in res.data, "Error message should mention unknown parameter"
+
+
+def test_api_import_small_synchronous(client, live_server, measure_memory_usage, datastore_path):
+    """Test that small imports (< threshold) are processed synchronously"""
+    from changedetectionio.api.Import import IMPORT_SWITCH_TO_BACKGROUND_THRESHOLD
+
+    api_key = live_server.app.config['DATASTORE'].data['settings']['application'].get('api_access_token')
+
+    # Use local test endpoint to avoid network delays
+    test_url_base = url_for('test_endpoint', _external=True)
+
+    # Create URLs: threshold - 1 to stay under limit
+    num_urls = min(5, IMPORT_SWITCH_TO_BACKGROUND_THRESHOLD - 1)  # Use small number for faster test
+    urls = '\n'.join([f'{test_url_base}?id=small-{i}' for i in range(num_urls)])
+
+    # Import small batch
+    res = client.post(
+        url_for("import") + "?tag=small-test",
+        data=urls,
+        headers={'x-api-key': api_key},
+        follow_redirects=True
+    )
+
+    # Should return 200 OK with UUID list (synchronous)
+    assert res.status_code == 200, f"Should return 200 for small imports, got {res.status_code}"
+    assert isinstance(res.json, list), "Response should be a list of UUIDs"
+    assert len(res.json) == num_urls, f"Should return {num_urls} UUIDs, got {len(res.json)}"
+
+    # Verify all watches were created immediately
+    for uuid in res.json:
+        assert uuid in live_server.app.config['DATASTORE'].data['watching'], \
+            f"Watch {uuid} should exist immediately after synchronous import"
+
+    print(f"\n✓ Successfully created {num_urls} watches synchronously")
+
+
+def test_api_import_large_background(client, live_server, measure_memory_usage, datastore_path):
+    """Test that large imports (>= threshold) are processed in background thread"""
+    from changedetectionio.api.Import import IMPORT_SWITCH_TO_BACKGROUND_THRESHOLD
+    import time
+
+    api_key = live_server.app.config['DATASTORE'].data['settings']['application'].get('api_access_token')
+
+    # Use local test endpoint to avoid network delays
+    test_url_base = url_for('test_endpoint', _external=True)
+
+    # Create URLs: threshold + 10 to trigger background processing
+    num_urls = IMPORT_SWITCH_TO_BACKGROUND_THRESHOLD + 10
+    urls = '\n'.join([f'{test_url_base}?id=bulk-{i}' for i in range(num_urls)])
+
+    # Import large batch
+    res = client.post(
+        url_for("import") + "?tag=bulk-test",
+        data=urls,
+        headers={'x-api-key': api_key},
+        follow_redirects=True
+    )
+
+    # Should return 202 Accepted (background processing)
+    assert res.status_code == 202, f"Should return 202 for large imports, got {res.status_code}"
+    assert b"background" in res.data.lower(), "Response should mention background processing"
+
+    # Extract expected count from response
+    response_json = res.json
+    assert 'count' in response_json, "Response should include count"
+    assert response_json['count'] == num_urls, f"Count should be {num_urls}, got {response_json['count']}"
+
+    # Wait for background thread to complete (with timeout)
+    max_wait = 10  # seconds
+    wait_interval = 0.5
+    elapsed = 0
+    watches_created = 0
+
+    while elapsed < max_wait:
+        time.sleep(wait_interval)
+        elapsed += wait_interval
+
+        # Count how many watches have been created
+        watches_created = len([
+            uuid for uuid, watch in live_server.app.config['DATASTORE'].data['watching'].items()
+            if 'id=bulk-' in watch['url']
+        ])
+
+        if watches_created == num_urls:
+            break
+
+    # Verify all watches were created
+    assert watches_created == num_urls, \
+        f"Expected {num_urls} watches to be created, but found {watches_created} after {elapsed}s"
+
+    # Verify watches have correct configuration
+    bulk_watches = [
+        watch for watch in live_server.app.config['DATASTORE'].data['watching'].values()
+        if 'id=bulk-' in watch['url']
+    ]
+
+    assert len(bulk_watches) == num_urls, "All bulk watches should exist"
+
+    # Check that they have the correct tag
+    datastore = live_server.app.config['DATASTORE']
+    # Get UUIDs of bulk watches by filtering the datastore keys
+    bulk_watch_uuids = [
+        uuid for uuid, watch in live_server.app.config['DATASTORE'].data['watching'].items()
+        if 'id=bulk-' in watch['url']
+    ]
+    for watch_uuid in bulk_watch_uuids:
+        tags = datastore.get_all_tags_for_watch(uuid=watch_uuid)
+        tag_names = [t['title'] for t in tags.values()]
+        assert 'bulk-test' in tag_names, f"Watch {watch_uuid} should have 'bulk-test' tag"
+
+    print(f"\n✓ Successfully created {num_urls} watches in background (took {elapsed}s)")
+
 
 def test_api_conflict_UI_password(client, live_server, measure_memory_usage, datastore_path):
 
