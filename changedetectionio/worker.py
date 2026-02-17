@@ -4,11 +4,10 @@ import changedetectionio.content_fetchers.exceptions as content_fetchers_excepti
 from changedetectionio.processors.text_json_diff.processor import FilterNotFoundInResponse
 from changedetectionio import html_tools
 from changedetectionio import worker_pool
-from changedetectionio.flask_app import watch_check_update
 from changedetectionio.queuedWatchMetaData import PrioritizedItem
+from changedetectionio.pluggy_interface import apply_update_handler_alter, apply_update_finalize
 
 import asyncio
-import importlib
 import os
 import sys
 import time
@@ -56,6 +55,7 @@ async def async_update_worker(worker_id, q, notification_q, app, datastore, exec
     while not app.config.exit.is_set():
         update_handler = None
         watch = None
+        processing_exception = None  # Reset at start of each iteration to prevent state bleeding
 
         try:
             # Efficient blocking via run_in_executor (no polling overhead!)
@@ -119,7 +119,7 @@ async def async_update_worker(worker_id, q, notification_q, app, datastore, exec
         # to prevent race condition with wait_for_all_checks()
 
         fetch_start_time = round(time.time())
-        
+
         try:
             if uuid in list(datastore.data['watching'].keys()) and datastore.data['watching'][uuid].get('url'):
                 changed_detected = False
@@ -136,6 +136,8 @@ async def async_update_worker(worker_id, q, notification_q, app, datastore, exec
                 logger.info(f"Worker {worker_id} processing watch UUID {uuid} Priority {queued_item_data.priority} URL {watch['url']}")
 
                 try:
+                    # Retrieve signal by name to ensure thread-safe access across worker threads
+                    watch_check_update = signal('watch_check_update')
                     watch_check_update.send(watch_uuid=uuid)
 
                     # Processor is what we are using for detecting the "Change"
@@ -153,6 +155,9 @@ async def async_update_worker(worker_id, q, notification_q, app, datastore, exec
 
                     update_handler = processor_module.perform_site_check(datastore=datastore,
                                                                          watch_uuid=uuid)
+
+                    # Allow plugins to modify/wrap the update_handler
+                    update_handler = apply_update_handler_alter(update_handler, watch, datastore)
 
                     update_signal = signal('watch_small_status_comment')
                     update_signal.send(watch_uuid=uuid, status="Fetching page..")
@@ -276,6 +281,9 @@ async def async_update_worker(worker_id, q, notification_q, app, datastore, exec
                     # Yes fine, so nothing todo, don't continue to process.
                     process_changedetection_results = False
                     changed_detected = False
+                    logger.debug(f'[{uuid}] - checksumFromPreviousCheckWasTheSame - Checksum from previous check was the same, nothing todo here.')
+                    # Reset the edited flag since we successfully completed the check
+                    watch.reset_watch_edited_flag()
                     
                 except content_fetchers_exceptions.BrowserConnectError as e:
                     datastore.update_watch(uuid=uuid,
@@ -378,7 +386,7 @@ async def async_update_worker(worker_id, q, notification_q, app, datastore, exec
                     if not datastore.data['watching'].get(uuid):
                         continue
 
-                    update_obj['content-type'] = update_handler.fetcher.get_all_headers().get('content-type', '').lower()
+                    update_obj['content-type'] = str(update_handler.fetcher.get_all_headers().get('content-type', '') or "").lower()
 
                     if not watch.get('ignore_status_codes'):
                         update_obj['consecutive_filter_failures'] = 0
@@ -392,6 +400,8 @@ async def async_update_worker(worker_id, q, notification_q, app, datastore, exec
                 logger.debug(f"Processing watch UUID: {uuid} - xpath_data length returned {len(update_handler.xpath_data) if update_handler and update_handler.xpath_data else 'empty.'}")
                 if update_handler and process_changedetection_results:
                     try:
+                        # Reset the edited flag BEFORE update_watch (which calls watch.update() and would set it again)
+                        watch.reset_watch_edited_flag()
                         datastore.update_watch(uuid=uuid, update_obj=update_obj)
 
                         if changed_detected or not watch.history_n:
@@ -439,8 +449,22 @@ async def async_update_worker(worker_id, q, notification_q, app, datastore, exec
                         logger.exception(f"Worker {worker_id} full exception details:")
                         datastore.update_watch(uuid=uuid, update_obj={'last_error': str(e)})
 
+
                 # Always record attempt count
                 count = watch.get('check_count', 0) + 1
+
+                final_updates = {'fetch_time': round(time.time() - fetch_start_time, 3),
+                                                                  'check_count': count,
+                                                                  }
+                # Record server header
+                try:
+                    server_header = str(update_handler.fetcher.get_all_headers().get('server', '') or "").strip().lower()[:255]
+                    if server_header:
+                        final_updates['remote_server_reply'] = server_header
+                except Exception as e:
+                    server_header = None
+                    pass
+
                 if update_handler: # Could be none or empty if the processor was not found
                     # Always record page title (used in notifications, and can change even when the content is the same)
                     if update_obj.get('content-type') and 'html' in update_obj.get('content-type'):
@@ -449,17 +473,10 @@ async def async_update_worker(worker_id, q, notification_q, app, datastore, exec
                             if page_title:
                                 page_title = page_title.strip()[:2000]
                                 logger.debug(f"UUID: {uuid} Page <title> is '{page_title}'")
-                                datastore.update_watch(uuid=uuid, update_obj={'page_title': page_title})
+                                final_updates['page_title'] = page_title
                         except Exception as e:
                             logger.exception(f"Worker {worker_id} full exception details:")
                             logger.warning(f"UUID: {uuid} Exception when extracting <title> - {str(e)}")
-
-                    # Record server header
-                    try:
-                        server_header = update_handler.fetcher.headers.get('server', '').strip().lower()[:255]
-                        datastore.update_watch(uuid=uuid, update_obj={'remote_server_reply': server_header})
-                    except Exception as e:
-                        pass
 
                     # Store favicon if necessary
                     if update_handler.fetcher.favicon_blob and update_handler.fetcher.favicon_blob.get('base64'):
@@ -467,14 +484,12 @@ async def async_update_worker(worker_id, q, notification_q, app, datastore, exec
                                            favicon_base_64=update_handler.fetcher.favicon_blob.get('base64')
                                            )
 
-                    datastore.update_watch(uuid=uuid, update_obj={'fetch_time': round(time.time() - fetch_start_time, 3),
-                                                                   'check_count': count})
+                    datastore.update_watch(uuid=uuid, update_obj=final_updates)
 
                     # NOW clear fetcher content - after all processing is complete
                     # This is the last point where we need the fetcher data
                     if update_handler and hasattr(update_handler, 'fetcher') and update_handler.fetcher:
                         update_handler.fetcher.clear_content()
-                        logger.debug(f"Cleared fetcher content for UUID {uuid}")
 
                     # Explicitly delete update_handler to free all references
                     if update_handler:
@@ -486,6 +501,8 @@ async def async_update_worker(worker_id, q, notification_q, app, datastore, exec
                 gc.collect()
 
         except Exception as e:
+            # Store the processing exception for plugin finalization hook
+            processing_exception = e
 
             logger.error(f"Worker {worker_id} unexpected error processing {uuid}: {e}")
             logger.exception(f"Worker {worker_id} full exception details:")
@@ -497,6 +514,11 @@ async def async_update_worker(worker_id, q, notification_q, app, datastore, exec
         finally:
             # Always cleanup - this runs whether there was an exception or not
             if uuid:
+                # Capture references for plugin finalize hook BEFORE cleanup
+                # (cleanup may delete these variables, but plugins need the original references)
+                finalize_handler = update_handler  # Capture now, before cleanup deletes it
+                finalize_watch = watch              # Capture now, before any modifications
+
                 # Call quit() as backup (Puppeteer/Playwright have internal cleanup, but this acts as safety net)
                 try:
                     if update_handler and hasattr(update_handler, 'fetcher') and update_handler.fetcher:
@@ -506,12 +528,6 @@ async def async_update_worker(worker_id, q, notification_q, app, datastore, exec
                     logger.exception(f"Worker {worker_id} full exception details:")
 
                 try:
-                    # Release UUID from processing (thread-safe)
-                    worker_pool.release_uuid_from_processing(uuid, worker_id=worker_id)
-
-                    # Send completion signal
-                    if watch:
-                        watch_check_update.send(watch_uuid=watch['uuid'])
 
                     # Clean up all memory references BEFORE garbage collection
                     if update_handler:
@@ -535,7 +551,37 @@ async def async_update_worker(worker_id, q, notification_q, app, datastore, exec
                     logger.error(f"Worker {worker_id} error during cleanup: {cleanup_error}")
                     logger.exception(f"Worker {worker_id} full exception details:")
 
-            del(uuid)
+                # Call plugin finalization hook after all cleanup is done
+                # Use captured references from before cleanup
+                try:
+                    apply_update_finalize(
+                        update_handler=finalize_handler,
+                        watch=finalize_watch,
+                        datastore=datastore,
+                        processing_exception=processing_exception
+                    )
+                except Exception as finalize_error:
+                    logger.error(f"Worker {worker_id} error in finalize hook: {finalize_error}")
+                    logger.exception(f"Worker {worker_id} full exception details:")
+                finally:
+                    # Clean up captured references to allow immediate garbage collection
+                    del finalize_handler
+                    del finalize_watch
+
+                # Release UUID from processing AFTER all cleanup and hooks complete (thread-safe)
+                # This ensures wait_for_all_checks() waits for finalize hooks to complete
+                try:
+                    worker_pool.release_uuid_from_processing(uuid, worker_id=worker_id)
+                except Exception as release_error:
+                    logger.error(f"Worker {worker_id} error releasing UUID: {release_error}")
+                    logger.exception(f"Worker {worker_id} full exception details:")
+                finally:
+                    # Send completion signal - retrieve by name to ensure thread-safe access
+                    if watch:
+                        watch_check_update = signal('watch_check_update')
+                        watch_check_update.send(watch_uuid=watch['uuid'])
+
+            del (uuid)
 
             # Brief pause before continuing to avoid tight error loops (only on error)
             if 'e' in locals():

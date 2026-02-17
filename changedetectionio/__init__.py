@@ -2,7 +2,7 @@
 
 # Read more https://github.com/dgtlmoon/changedetection.io/wiki
 # Semver means never use .01, or 00. Should be .1.
-__version__ = '0.52.9-svdev-1'
+__version__ = '0.53.3-svdev'
 
 from changedetectionio.strtobool import strtobool
 from json.decoder import JSONDecodeError
@@ -610,7 +610,7 @@ def main():
 
     @app.context_processor
     def inject_template_globals():
-        return dict(right_sticky="v{}".format(datastore.data['version_tag']),
+        return dict(right_sticky="v"+__version__,
                     new_version_available=app.config['NEW_VERSION_AVAILABLE'],
                     has_password=datastore.data['settings']['application']['password'] != False,
                     socket_io_enabled=datastore.data['settings']['application'].get('ui', {}).get('socket_io_enabled', True),

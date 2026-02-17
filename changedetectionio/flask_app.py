@@ -70,13 +70,17 @@ socketio_server = None
 # Enable CORS, especially useful for the Chrome extension to operate from anywhere
 CORS(app)
 
-# Super handy for compressing large BrowserSteps responses and others
-# Flask-Compress handles HTTP compression, Socket.IO compression disabled to prevent memory leak
+# Flask-Compress handles HTTP compression, Socket.IO compression disabled to prevent memory leak.
+# There's also a bug between flask compress and socketio that causes some kind of slow memory leak
+# It's better to use compression on your reverse proxy (nginx etc) instead.
+if strtobool(os.getenv("FLASK_ENABLE_COMPRESSION")):
+    app.config['COMPRESS_MIN_SIZE'] = 2096
+    app.config['COMPRESS_MIMETYPES'] = ['text/html', 'text/css', 'text/javascript', 'application/json', 'application/javascript', 'image/svg+xml']
+    # Use gzip only - smaller memory footprint than zstd/brotli (4-8KB vs 200-500KB contexts)
+    app.config['COMPRESS_ALGORITHM'] = ['gzip']
+
 compress = FlaskCompress()
-app.config['COMPRESS_MIN_SIZE'] = 2096
-app.config['COMPRESS_MIMETYPES'] = ['text/html', 'text/css', 'text/javascript', 'application/json', 'application/javascript', 'image/svg+xml']
-# Use gzip only - smaller memory footprint than zstd/brotli (4-8KB vs 200-500KB contexts)
-app.config['COMPRESS_ALGORITHM'] = ['gzip']
+
 compress.init_app(app)
 app.config['TEMPLATES_AUTO_RELOAD'] = False
 
@@ -708,8 +712,14 @@ def changedetection_app(config=None, datastore_o=None):
     def static_content(group, filename):
         from flask import make_response
         import re
-        group = re.sub(r'[^\w.-]+', '', group.lower())
-        filename = re.sub(r'[^\w.-]+', '', filename.lower())
+
+        # Strict sanitization: only allow a-z, 0-9, and underscore (blocks .. and other traversal)
+        group = re.sub(r'[^a-z0-9_-]+', '', group.lower())
+        filename = filename
+
+        # Additional safety: reject if sanitization resulted in empty strings
+        if not group or not filename:
+            abort(404)
 
         if group == 'screenshot':
             # Could be sensitive, follow password requirements
