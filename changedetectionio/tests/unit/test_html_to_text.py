@@ -199,6 +199,259 @@ class TestHtmlToText(unittest.TestCase):
 
         print(f"✓ Basic thread-safety test passed: {len(results)} threads, no errors")
 
+    def test_large_html_with_bloated_head(self):
+        """
+        Test that html_to_text can handle large HTML documents with massive <head> bloat.
+
+        SPAs often dump 10MB+ of styles, scripts, and other bloat into the <head> section.
+        This can cause inscriptis to silently exit when processing very large documents.
+        The fix strips <style>, <script>, <svg>, <noscript>, <link>, <meta>, and HTML comments
+        before processing, allowing extraction of actual body content.
+        """
+        # Generate massive style block (~5MB)
+        large_style = '<style>' + '.class{color:red;}\n' * 200000 + '</style>\n'
+
+        # Generate massive script block (~5MB)
+        large_script = '<script>' + 'console.log("bloat");\n' * 200000 + '</script>\n'
+
+        # Generate lots of SVG bloat (~3MB)
+        svg_bloat = '<svg><path d="M0,0 L100,100"/></svg>\n' * 50000
+
+        # Generate meta/link tags (~2MB)
+        meta_bloat = '<meta name="description" content="bloat"/>\n' * 50000
+        link_bloat = '<link rel="stylesheet" href="bloat.css"/>\n' * 50000
+
+        # Generate HTML comments (~1MB)
+        comment_bloat = '<!-- This is bloat -->\n' * 50000
+
+        # Generate noscript bloat
+        noscript_bloat = '<noscript>Enable JavaScript</noscript>\n' * 10000
+
+        # Build the large HTML document
+        html = f'''<!DOCTYPE html>
+<html>
+<head>
+    <title>Test Page</title>
+    {large_style}
+    {large_script}
+    {svg_bloat}
+    {meta_bloat}
+    {link_bloat}
+    {comment_bloat}
+    {noscript_bloat}
+</head>
+<body>
+    <h1>Important Heading</h1>
+    <p>This is the actual content that should be extracted.</p>
+    <div>
+        <p>First paragraph with meaningful text.</p>
+        <p>Second paragraph with more content.</p>
+    </div>
+    <footer>Footer text</footer>
+</body>
+</html>
+'''
+
+        # Verify the HTML is actually large (should be ~20MB+)
+        html_size_mb = len(html) / (1024 * 1024)
+        assert html_size_mb > 15, f"HTML should be >15MB, got {html_size_mb:.2f}MB"
+
+        print(f"  Testing {html_size_mb:.2f}MB HTML document with bloated head...")
+
+        # This should not crash or silently exit
+        text = html_to_text(html)
+
+        # Verify we got actual text output (not empty/None)
+        assert text is not None, "html_to_text returned None"
+        assert len(text) > 0, "html_to_text returned empty string"
+
+        # Verify the actual body content was extracted
+        assert 'Important Heading' in text, "Failed to extract heading"
+        assert 'actual content that should be extracted' in text, "Failed to extract paragraph"
+        assert 'First paragraph with meaningful text' in text, "Failed to extract first paragraph"
+        assert 'Second paragraph with more content' in text, "Failed to extract second paragraph"
+        assert 'Footer text' in text, "Failed to extract footer"
+
+        # Verify bloat was stripped (output should be tiny compared to input)
+        text_size_kb = len(text) / 1024
+        assert text_size_kb < 1, f"Output too large ({text_size_kb:.2f}KB), bloat not stripped"
+
+        # Verify no CSS, script content, or SVG leaked through
+        assert 'color:red' not in text, "Style content leaked into text output"
+        assert 'console.log' not in text, "Script content leaked into text output"
+        assert '<path' not in text, "SVG content leaked into text output"
+        assert 'bloat.css' not in text, "Link href leaked into text output"
+
+        print(f"  ✓ Successfully processed {html_size_mb:.2f}MB HTML -> {text_size_kb:.2f}KB text")
+
+    def test_body_display_none_spa_pattern(self):
+        """
+        Test that html_to_text can extract content from pages with display:none body.
+
+        SPAs (Single Page Applications) often use <body style="display:none"> to hide content
+        until JavaScript loads and renders the page. inscriptis respects CSS display rules,
+        so without preprocessing, it would skip all content and return only newlines.
+
+        The fix strips display:none and visibility:hidden styles from the body tag before
+        processing, allowing text extraction from client-side rendered applications.
+        """
+        # Test case 1: Basic display:none
+        html1 = '''<!DOCTYPE html>
+<html lang="en">
+<head><title>What's New – Fluxguard</title></head>
+<body style="display:none">
+    <h1>Important Heading</h1>
+    <p>This is actual content that should be extracted.</p>
+    <div>
+        <p>First paragraph with meaningful text.</p>
+        <p>Second paragraph with more content.</p>
+    </div>
+</body>
+</html>'''
+
+        text1 = html_to_text(html1)
+
+        # Before fix: would return ~33 newlines, len(text) ~= 33
+        # After fix: should extract actual content, len(text) > 100
+        assert len(text1) > 100, f"Expected substantial text output, got {len(text1)} chars"
+        assert 'Important Heading' in text1, "Failed to extract heading from display:none body"
+        assert 'actual content' in text1, "Failed to extract paragraph from display:none body"
+        assert 'First paragraph' in text1, "Failed to extract nested content"
+
+        # Should not be mostly newlines
+        newline_ratio = text1.count('\n') / len(text1)
+        assert newline_ratio < 0.5, f"Output is mostly newlines ({newline_ratio:.2%}), content not extracted"
+
+        # Test case 2: visibility:hidden (another hiding pattern)
+        html2 = '<html><body style="visibility:hidden"><h1>Hidden Content</h1><p>Test paragraph.</p></body></html>'
+        text2 = html_to_text(html2)
+
+        assert 'Hidden Content' in text2, "Failed to extract content from visibility:hidden body"
+        assert 'Test paragraph' in text2, "Failed to extract paragraph from visibility:hidden body"
+
+        # Test case 3: Mixed styles (display:none with other CSS)
+        html3 = '<html><body style="color: red; display:none; font-size: 12px"><p>Mixed style content</p></body></html>'
+        text3 = html_to_text(html3)
+
+        assert 'Mixed style content' in text3, "Failed to extract content from body with mixed styles"
+
+        # Test case 4: Case insensitivity (DISPLAY:NONE uppercase)
+        html4 = '<html><body style="DISPLAY:NONE"><p>Uppercase style</p></body></html>'
+        text4 = html_to_text(html4)
+
+        assert 'Uppercase style' in text4, "Failed to handle uppercase DISPLAY:NONE"
+
+        # Test case 5: Space variations (display: none vs display:none)
+        html5 = '<html><body style="display: none"><p>With spaces</p></body></html>'
+        text5 = html_to_text(html5)
+
+        assert 'With spaces' in text5, "Failed to handle 'display: none' with space"
+
+        # Test case 6: Body with other attributes (class, id)
+        html6 = '<html><body class="foo" style="display:none" id="bar"><p>With attributes</p></body></html>'
+        text6 = html_to_text(html6)
+
+        assert 'With attributes' in text6, "Failed to extract from body with multiple attributes"
+
+        # Test case 7: Should NOT affect opacity:0 (which doesn't hide from inscriptis)
+        html7 = '<html><body style="opacity:0"><p>Transparent content</p></body></html>'
+        text7 = html_to_text(html7)
+
+        # Opacity doesn't affect inscriptis text extraction, content should be there
+        assert 'Transparent content' in text7, "Incorrectly stripped opacity:0 style"
+
+        print("  ✓ All display:none body tag tests passed")
+
+    def test_style_tag_with_svg_data_uri(self):
+        """
+        Test that style tags containing SVG data URIs are properly stripped.
+
+        Some WordPress and modern sites embed SVG as data URIs in CSS, which contains
+        <svg> and </svg> tags within the style content. The regex must use backreferences
+        to ensure <style> matches </style> (not </svg> inside the CSS).
+
+        This was causing errors where the regex would match <style> and stop at the first
+        </svg> it encountered inside a CSS data URI, breaking the HTML structure.
+        """
+        # Real-world example from WordPress wp-block-image styles
+        html = '''<!DOCTYPE html>
+<html>
+<head>
+    <style id='wp-block-image-inline-css'>
+.wp-block-image>a,.wp-block-image>figure>a{display:inline-block}.wp-block-image img{box-sizing:border-box;height:auto;max-width:100%;vertical-align:bottom}@supports ((-webkit-mask-image:none) or (mask-image:none)) or (-webkit-mask-image:none){.wp-block-image.is-style-circle-mask img{border-radius:0;-webkit-mask-image:url('data:image/svg+xml;utf8,<svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg"><circle cx="50" cy="50" r="50"/></svg>');mask-image:url('data:image/svg+xml;utf8,<svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg"><circle cx="50" cy="50" r="50"/></svg>');mask-mode:alpha}}
+    </style>
+</head>
+<body>
+    <h1>Test Heading</h1>
+    <p>This is the actual content that should be extracted.</p>
+    <div class="wp-block-image">
+        <img src="test.jpg" alt="Test image">
+    </div>
+</body>
+</html>'''
+
+        # This should not crash and should extract the body content
+        text = html_to_text(html)
+
+        # Verify the actual body content was extracted
+        assert text is not None, "html_to_text returned None"
+        assert len(text) > 0, "html_to_text returned empty string"
+        assert 'Test Heading' in text, "Failed to extract heading"
+        assert 'actual content that should be extracted' in text, "Failed to extract paragraph"
+
+        # Verify CSS content was stripped (including the SVG data URI)
+        assert '.wp-block-image' not in text, "CSS class selector leaked into text"
+        assert 'mask-image' not in text, "CSS property leaked into text"
+        assert 'data:image/svg+xml' not in text, "SVG data URI leaked into text"
+        assert 'viewBox' not in text, "SVG attributes leaked into text"
+
+        # Verify no broken HTML structure
+        assert '<style' not in text, "Unclosed style tag in output"
+        assert '</svg>' not in text, "SVG closing tag leaked into text"
+
+        print("  ✓ Style tag with SVG data URI test passed")
+
+    def test_style_tag_closes_correctly(self):
+        """
+        Test that each tag type (style, script, svg) closes with the correct closing tag.
+
+        Before the fix, the regex used (?:style|script|svg|noscript) for both opening and
+        closing tags, which meant <style> could incorrectly match </svg> as its closing tag.
+        With backreferences, <style> must close with </style>, <svg> with </svg>, etc.
+        """
+        # Test nested tags where incorrect matching would break
+        html = '''<!DOCTYPE html>
+<html>
+<head>
+    <style>
+        body { background: url('data:image/svg+xml,<svg><rect/></svg>'); }
+    </style>
+    <script>
+        const svg = '<svg><path d="M0,0"/></svg>';
+    </script>
+</head>
+<body>
+    <h1>Content</h1>
+    <svg><circle cx="50" cy="50" r="40"/></svg>
+    <p>After SVG</p>
+</body>
+</html>'''
+
+        text = html_to_text(html)
+
+        # Should extract body content
+        assert 'Content' in text, "Failed to extract heading"
+        assert 'After SVG' in text, "Failed to extract content after SVG"
+
+        # Should strip all style/script/svg content
+        assert 'background:' not in text, "Style content leaked"
+        assert 'const svg' not in text, "Script content leaked"
+        assert '<circle' not in text, "SVG element leaked"
+        assert 'data:image/svg+xml' not in text, "Data URI leaked"
+
+        print("  ✓ Tag closing validation test passed")
+
+
 
 if __name__ == '__main__':
     # Can run this file directly for quick testing
