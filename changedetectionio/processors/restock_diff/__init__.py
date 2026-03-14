@@ -31,6 +31,7 @@ class Restock(dict):
 
         if standardized_value:
             # Convert to float
+            # @todo locale needs to be the locale of the webpage
             return float(parse_decimal(standardized_value, locale='en'))
 
         return None
@@ -67,10 +68,6 @@ class Watch(BaseWatch):
         super().__init__(*arg, **kw)
         self['restock'] = Restock(kw['default']['restock']) if kw.get('default') and kw['default'].get('restock') else Restock()
 
-        self['restock_settings'] = kw['default']['restock_settings'] if kw.get('default',{}).get('restock_settings') else {
-            'follow_price_changes': True,
-            'in_stock_processing' : 'in_stock_only'
-        } #@todo update
 
     def clear_watch(self):
         super().clear_watch()
