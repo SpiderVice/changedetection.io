@@ -9,10 +9,21 @@ function request_textpreview_update() {
     $('textarea:visible, input:visible').each(function () {
         const $element = $(this); // Cache the jQuery object for the current element
         const name = $element.attr('name'); // Get the name attribute of the element
+        // Radios share a name across multiple inputs; .val() returns the value
+        // attribute regardless of checked state, so iterating would let the last
+        // unchecked radio overwrite the user's actual selection. Skip unchecked.
+        if ($element.is(':radio') && !$element.is(':checked')) return;
         data[name] = $element.is(':checkbox') ? ($element.is(':checked') ? $element.val() : false) : $element.val();
     });
 
+    // llm_intent lives in a separate (potentially hidden) tab — include it explicitly
+    const $llmIntent = $('textarea[name="llm_intent"]');
+    if ($llmIntent.length) {
+        data['llm_intent'] = $llmIntent.val();
+    }
+
     $('body').toggleClass('spinner-active', 1);
+    $('#llm-preview-result').hide();
 
     $.abortiveSingularAjax({
         type: "POST",
@@ -28,19 +39,34 @@ function request_textpreview_update() {
                 {
                     'color': 'var(--highlight-trigger-text-bg-color)',
                     'lines': data['trigger_line_numbers'],
-                    'title': "Triggers a change if this text appears, AND something changed in the document."
+                    'title': i18nT('highlightTrigger', "Triggers a change if this text appears, AND something changed in the document.")
                 },
                 {
                     'color': 'var(--highlight-ignored-text-bg-color)',
                     'lines': data['ignore_line_numbers'],
-                    'title': "Ignored for calculating changes, but still shown."
+                    'title': i18nT('highlightIgnored', "Ignored for calculating changes, but still shown.")
                 },
                 {
                     'color': 'var(--highlight-blocked-text-bg-color)',
                     'lines': data['blocked_line_numbers'],
-                    'title': "No change-detection will occur because this text exists."
+                    'title': i18nT('highlightBlocked', "No change-detection will occur because this text exists.")
                 }
             ])
+
+        // LLM preview extraction result
+        const $llmResult = $('#llm-preview-result');
+        if ($llmResult.length && data['llm_evaluation']) {
+            const ev = data['llm_evaluation'];
+            const found = ev['found'];
+            $llmResult.attr('data-found', found ? '1' : '0');
+            $llmResult.find('.llm-preview-verdict').text(
+                found ? '✓ Would trigger a change' : '✗ Would not trigger a change'
+            );
+            $llmResult.find('.llm-preview-answer').text(ev['answer'] || '');
+            $llmResult.show();
+        } else if ($llmResult.length) {
+            $llmResult.hide();
+        }
     }).fail(function (error) {
         if (error.statusText === 'abort') {
             console.log('Request was aborted due to a new request being fired.');
@@ -81,9 +107,9 @@ $(document).ready(function () {
         $('#filters-and-triggers input')[method]('change', request_textpreview_update.throttle(1000));
         $("#filters-and-triggers-tab")[method]('click', request_textpreview_update.throttle(1000));
     });
-    $('.minitabs-wrapper').miniTabs({
-        "Content after filters": "#text-preview-inner",
-        "Content raw/before filters": "#text-preview-before-inner"
-    });
+    var _mt = {};
+    _mt[i18nT('tabContentAfter', 'Content after filters')] = "#text-preview-inner";
+    _mt[i18nT('tabContentBefore', 'Content raw/before filters')] = "#text-preview-before-inner";
+    $('.minitabs-wrapper').miniTabs(_mt);
 });
 

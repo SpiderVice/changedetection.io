@@ -11,10 +11,10 @@ from changedetectionio.tests.util import set_original_response, set_modified_res
     set_longer_modified_response, delete_all_watches
 
 import logging
-
+import os
 
 # NOTE - RELIES ON mailserver as hostname running, see github build recipes
-smtp_test_server = 'mailserver'
+smtp_test_server = os.getenv('SMTP_TEST_MAILSERVER', 'mailserver')
 
 ALL_MARKUP_TOKENS = ''.join(f"TOKEN: '{t}'\n{{{{{t}}}}}\n" for t in NotificationContextData().keys())
 
@@ -51,13 +51,11 @@ def test_check_notification_email_formats_default_HTML(client, live_server, meas
     #####################
     # Set this up for when we remove the notification from the watch, it should fallback with these details
     res = client.post(
-        url_for("settings.settings_page"),
-        data={"application-notification_urls": notification_url,
-              "application-notification_title": "fallback-title " + default_notification_title,
-              "application-notification_body": "some text\nfallback-body<br> " + default_notification_body,
-              "application-notification_format": 'html',
-              "requests-time_between_check-minutes": 180,
-              'application-fetch_backend': "html_requests"},
+        url_for("settings.notifications.apprise"),
+        data={"notification_urls": notification_url,
+              "notification_title": "fallback-title " + default_notification_title,
+              "notification_body": "some text\nfallback-body<br> " + default_notification_body,
+              "notification_format": 'html'},
         follow_redirects=True
     )
     assert b"Settings updated." in res.data
@@ -108,7 +106,9 @@ def test_check_notification_email_formats_default_HTML(client, live_server, meas
     html_content = html_part.get_content()
     assert 'some text<br>' in html_content  # We converted \n from the notification body
     assert 'fallback-body<br>' in html_content  # kept the original <br>
-    assert '(added) So let\'s see what happens.<br>' in html_content  # the html part
+    # GHSA-q8xq-qg4x-wphg: apostrophes in diff content are escaped (&#39;) for HTML notifications.
+    # Renders as ' in the recipient's email client; only the byte-source differs.
+    assert '(added) So let&#39;s see what happens.<br>' in html_content  # the html part
     delete_all_watches(client)
 
 
@@ -121,13 +121,11 @@ def test_check_notification_plaintext_format(client, live_server, measure_memory
     #####################
     # Set this up for when we remove the notification from the watch, it should fallback with these details
     res = client.post(
-        url_for("settings.settings_page"),
-        data={"application-notification_urls": notification_url,
-              "application-notification_title": "fallback-title {{watch_title}}  {{ diff_added.splitlines()[0] if diff_added else 'diff added didnt split' }}  " + default_notification_title,
-              "application-notification_body": f"some text\n" + default_notification_body + f"\nMore output test\n{ALL_MARKUP_TOKENS}",
-              "application-notification_format": 'text',
-              "requests-time_between_check-minutes": 180,
-              'application-fetch_backend': "html_requests"},
+        url_for("settings.notifications.apprise"),
+        data={"notification_urls": notification_url,
+              "notification_title": "fallback-title {{watch_title}}  {{ diff_added.splitlines()[0] if diff_added else 'diff added didnt split' }}  " + default_notification_title,
+              "notification_body": f"some text\n" + default_notification_body + f"\nMore output test\n{ALL_MARKUP_TOKENS}",
+              "notification_format": 'text'},
         follow_redirects=True
     )
 
@@ -183,13 +181,11 @@ def test_check_notification_html_color_format(client, live_server, measure_memor
     #####################
     # Set this up for when we remove the notification from the watch, it should fallback with these details
     res = client.post(
-        url_for("settings.settings_page"),
-        data={"application-notification_urls": notification_url,
-              "application-notification_title": "fallback-title {{watch_title}} - diff_added_lines_test : '{{ diff_added.splitlines()[0] if diff_added else 'diff added didnt split' }}' " + default_notification_title,
-              "application-notification_body": f"some text\n{default_notification_body}\nMore output test\n{ALL_MARKUP_TOKENS}",
-              "application-notification_format": 'htmlcolor',
-              "requests-time_between_check-minutes": 180,
-              'application-fetch_backend': "html_requests"},
+        url_for("settings.notifications.apprise"),
+        data={"notification_urls": notification_url,
+              "notification_title": "fallback-title {{watch_title}} - diff_added_lines_test : '{{ diff_added.splitlines()[0] if diff_added else 'diff added didnt split' }}' " + default_notification_title,
+              "notification_body": f"some text\n{default_notification_body}\nMore output test\n{ALL_MARKUP_TOKENS}",
+              "notification_format": 'htmlcolor'},
         follow_redirects=True
     )
 
@@ -268,13 +264,11 @@ def test_check_notification_markdown_format(client, live_server, measure_memory_
     #####################
     # Set this up for when we remove the notification from the watch, it should fallback with these details
     res = client.post(
-        url_for("settings.settings_page"),
-        data={"application-notification_urls": notification_url,
-              "application-notification_title": "fallback-title  diff_added_lines_test : '{{ diff_added.splitlines()[0] if diff_added else 'diff added didnt split' }}' " + default_notification_title,
-              "application-notification_body": "*header*\n\nsome text\n" + default_notification_body,
-              "application-notification_format": 'markdown',
-              "requests-time_between_check-minutes": 180,
-              'application-fetch_backend': "html_requests"},
+        url_for("settings.notifications.apprise"),
+        data={"notification_urls": notification_url,
+              "notification_title": "fallback-title  diff_added_lines_test : '{{ diff_added.splitlines()[0] if diff_added else 'diff added didnt split' }}' " + default_notification_title,
+              "notification_body": "*header*\n\nsome text\n" + default_notification_body,
+              "notification_format": 'markdown'},
         follow_redirects=True
     )
 
@@ -364,13 +358,11 @@ def test_check_notification_email_formats_default_Text_override_HTML(client, liv
     #####################
     # Set this up for when we remove the notification from the watch, it should fallback with these details
     res = client.post(
-        url_for("settings.settings_page"),
-        data={"application-notification_urls": notification_url,
-              "application-notification_title": "fallback-title " + default_notification_title,
-              "application-notification_body": notification_body,
-              "application-notification_format": 'text',
-              "requests-time_between_check-minutes": 180,
-              'application-fetch_backend': "html_requests"},
+        url_for("settings.notifications.apprise"),
+        data={"notification_urls": notification_url,
+              "notification_title": "fallback-title " + default_notification_title,
+              "notification_body": notification_body,
+              "notification_format": 'text'},
         follow_redirects=True
     )
     assert b"Settings updated." in res.data
@@ -452,7 +444,8 @@ def test_check_notification_email_formats_default_Text_override_HTML(client, liv
     html_part = parts[1]
     assert html_part.get_content_type() == 'text/html'
     html_content = html_part.get_content()
-    assert '(removed) So let\'s see what happens.' in html_content  # the html part
+    # GHSA-q8xq-qg4x-wphg: apostrophes in diff content are escaped (&#39;) for HTML notifications.
+    assert '(removed) So let&#39;s see what happens.' in html_content  # the html part
     assert '&lt;!DOCTYPE html' not in html_content
     assert '<!DOCTYPE html' in html_content # Our original template is working correctly
 
@@ -475,13 +468,11 @@ def test_check_plaintext_document_plaintext_notification_smtp(client, live_serve
     #####################
     # Set this up for when we remove the notification from the watch, it should fallback with these details
     res = client.post(
-        url_for("settings.settings_page"),
-        data={"application-notification_urls": notification_url,
-              "application-notification_title": "fallback-title " + default_notification_title,
-              "application-notification_body": f"{notification_body}\nMore output test\n{ALL_MARKUP_TOKENS}",
-              "application-notification_format": 'text',
-              "requests-time_between_check-minutes": 180,
-              'application-fetch_backend': "html_requests"},
+        url_for("settings.notifications.apprise"),
+        data={"notification_urls": notification_url,
+              "notification_title": "fallback-title " + default_notification_title,
+              "notification_body": f"{notification_body}\nMore output test\n{ALL_MARKUP_TOKENS}",
+              "notification_format": 'text'},
         follow_redirects=True
     )
     assert b"Settings updated." in res.data
@@ -528,13 +519,11 @@ def test_check_plaintext_document_html_notifications(client, live_server, measur
     #####################
     # Set this up for when we remove the notification from the watch, it should fallback with these details
     res = client.post(
-        url_for("settings.settings_page"),
-        data={"application-notification_urls": notification_url,
-              "application-notification_title": "fallback-title " + default_notification_title,
-              "application-notification_body": f"{notification_body}\nMore output test\n{ALL_MARKUP_TOKENS}",
-              "application-notification_format": 'html',
-              "requests-time_between_check-minutes": 180,
-              'application-fetch_backend': "html_requests"},
+        url_for("settings.notifications.apprise"),
+        data={"notification_urls": notification_url,
+              "notification_title": "fallback-title " + default_notification_title,
+              "notification_body": f"{notification_body}\nMore output test\n{ALL_MARKUP_TOKENS}",
+              "notification_format": 'html'},
         follow_redirects=True
     )
     assert b"Settings updated." in res.data
@@ -608,13 +597,11 @@ def test_check_plaintext_document_html_color_notifications(client, live_server, 
     #####################
     # Set this up for when we remove the notification from the watch, it should fallback with these details
     res = client.post(
-        url_for("settings.settings_page"),
-        data={"application-notification_urls": notification_url,
-              "application-notification_title": "fallback-title " + default_notification_title,
-              "application-notification_body": f"{notification_body}\nMore output test\n{ALL_MARKUP_TOKENS}",
-              "application-notification_format": 'htmlcolor',
-              "requests-time_between_check-minutes": 180,
-              'application-fetch_backend': "html_requests"},
+        url_for("settings.notifications.apprise"),
+        data={"notification_urls": notification_url,
+              "notification_title": "fallback-title " + default_notification_title,
+              "notification_body": f"{notification_body}\nMore output test\n{ALL_MARKUP_TOKENS}",
+              "notification_format": 'htmlcolor'},
         follow_redirects=True
     )
 
@@ -681,13 +668,11 @@ def test_check_html_document_plaintext_notification(client, live_server, measure
     #####################
     # Set this up for when we remove the notification from the watch, it should fallback with these details
     res = client.post(
-        url_for("settings.settings_page"),
-        data={"application-notification_urls": notification_url,
-              "application-notification_title": "fallback-title " + default_notification_title,
-              "application-notification_body": f"{notification_body}\nMore output test\n{ALL_MARKUP_TOKENS}",
-              "application-notification_format": 'text',
-              "requests-time_between_check-minutes": 180,
-              'application-fetch_backend': "html_requests"},
+        url_for("settings.notifications.apprise"),
+        data={"notification_urls": notification_url,
+              "notification_title": "fallback-title " + default_notification_title,
+              "notification_body": f"{notification_body}\nMore output test\n{ALL_MARKUP_TOKENS}",
+              "notification_format": 'text'},
         follow_redirects=True
     )
 
@@ -735,13 +720,11 @@ def test_check_html_notification_with_apprise_format_is_html(client, live_server
     #####################
     # Set this up for when we remove the notification from the watch, it should fallback with these details
     res = client.post(
-        url_for("settings.settings_page"),
-        data={"application-notification_urls": notification_url,
-              "application-notification_title": "fallback-title " + default_notification_title,
-              "application-notification_body": "some text\nfallback-body<br> " + default_notification_body,
-              "application-notification_format": 'html',
-              "requests-time_between_check-minutes": 180,
-              'application-fetch_backend': "html_requests"},
+        url_for("settings.notifications.apprise"),
+        data={"notification_urls": notification_url,
+              "notification_title": "fallback-title " + default_notification_title,
+              "notification_body": "some text\nfallback-body<br> " + default_notification_body,
+              "notification_format": 'html'},
         follow_redirects=True
     )
     assert b"Settings updated." in res.data
@@ -792,5 +775,6 @@ def test_check_html_notification_with_apprise_format_is_html(client, live_server
     html_content = html_part.get_content()
     assert 'some text<br>' in html_content  # We converted \n from the notification body
     assert 'fallback-body<br>' in html_content  # kept the original <br>
-    assert '(added) So let\'s see what happens.<br>' in html_content  # the html part
+    # GHSA-q8xq-qg4x-wphg: apostrophes in diff content are escaped (&#39;) for HTML notifications.
+    assert '(added) So let&#39;s see what happens.<br>' in html_content  # the html part
     delete_all_watches(client)

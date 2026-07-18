@@ -196,6 +196,44 @@ def get_darkmode_state():
 def get_css_version():
     return __version__
 
+@app.template_global('filtered_action_url')
+def _filtered_action_url(endpoint, **overrides):
+    """Build a URL to `endpoint` carrying the CURRENT watch-list filters (query args)
+    with `overrides` merged in. Used so filter links compose AND so list actions
+    (mark-all-viewed, recheck-all) act on exactly the filtered view, not everything.
+    Keys set to None/''/0 are dropped, and pagination always resets."""
+    args = request.args.to_dict()
+    args.pop('page', None)
+    args.update(overrides)
+    args = {k: v for k, v in args.items() if v not in (None, '', 0, '0')}
+    return url_for(endpoint, **args)
+
+@app.template_global('filter_url')
+def _filter_url(**overrides):
+    """Watch-list filter link (shorthand for filtered_action_url('watchlist.index'))."""
+    return _filtered_action_url('watchlist.index', **overrides)
+
+@app.template_global()
+def get_sidebar_mode_class():
+    """Body class that drives the left-rail behaviour (see parts/_action_sidebar.scss).
+
+    'collapsed' -> slim icon rail that expands on hover/focus (actionsidebar-minimal)
+    'pinned'    -> rail always expanded with labels visible (actionside-bar-on)
+    """
+    mode = datastore.data['settings']['application'].get('ui', {}).get('sidebar_mode', 'collapsed')
+    # Pinned mode is permanently expanded, so it carries 'action-side-bar-expanded'
+    # from the start. In collapsed mode that class is toggled on hover/focus by
+    # static/js/sidebar.js.
+    return 'actionside-bar-on action-side-bar-expanded' if mode == 'pinned' else 'actionsidebar-minimal'
+
+@app.template_global()
+def get_blueprint_class():
+    """Body class for the currently-executing blueprint, e.g. 'blueprint-watchlist'
+    or 'blueprint-ui-ui_queue' (dots → dashes), so CSS can target a section. Empty
+    when there's no blueprint (e.g. an error page)."""
+    bp = request.blueprint or ''
+    return ('blueprint-' + bp.replace('.', '-')) if bp else ''
+
 @app.template_global()
 def get_socketio_path():
     """Generate the correct Socket.IO path prefix for the client"""
@@ -212,6 +250,11 @@ def _is_safe_valid_url(test_url):
     from .validate_url import is_safe_valid_url
     return is_safe_valid_url(test_url)
 
+@app.template_global('get_html_head_extras')
+def _get_html_head_extras():
+    from .pluggy_interface import collect_html_head_extras
+    return collect_html_head_extras()
+
 
 @app.template_filter('format_number_locale')
 def _jinja2_filter_format_number_locale(value: float) -> str:
@@ -219,6 +262,11 @@ def _jinja2_filter_format_number_locale(value: float) -> str:
     # Format the number with two decimal places (locale format string will return 6 decimal)
     formatted_value = locale.format_string("%.2f", value, grouping=True)
     return formatted_value
+
+@app.template_filter('format_int_locale')
+def _jinja2_filter_format_int_locale(value) -> str:
+    "Locale-grouped integer, e.g. 1000 -> 1,000 (no decimals — for counts)"
+    return locale.format_string("%d", int(value), grouping=True)
 
 @app.template_filter('regex_search')
 def _jinja2_filter_regex_search(value, pattern):
@@ -263,24 +311,26 @@ def _jinja2_filter_datetime(watch_obj, format="%Y-%m-%d %H:%M:%S"):
     if watch_obj['last_checked'] == 0:
         return gettext('Not yet')
 
-    locale = get_timeago_locale(str(get_locale()))
+    short = datastore.data['settings']['application'].get('ui', {}).get('timeago_format') == 'short'
+    locale = get_timeago_locale(str(get_locale()), short=short)
     try:
         return timeago.format(int(watch_obj['last_checked']), time.time(), locale)
     except:
         # Fallback to English if locale not supported by timeago
-        return timeago.format(int(watch_obj['last_checked']), time.time(), 'en')
+        return timeago.format(int(watch_obj['last_checked']), time.time(), 'en_short' if short else 'en')
 
 @app.template_filter('format_timestamp_timeago')
 def _jinja2_filter_datetimestamp(timestamp, format="%Y-%m-%d %H:%M:%S"):
     if not timestamp:
         return gettext('Not yet')
 
-    locale = get_timeago_locale(str(get_locale()))
+    short = datastore.data['settings']['application'].get('ui', {}).get('timeago_format') == 'short'
+    locale = get_timeago_locale(str(get_locale()), short=short)
     try:
         return timeago.format(int(timestamp), time.time(), locale)
     except:
         # Fallback to English if locale not supported by timeago
-        return timeago.format(int(timestamp), time.time(), 'en')
+        return timeago.format(int(timestamp), time.time(), 'en_short' if short else 'en')
 
 
 @app.template_filter('pagination_slice')
@@ -409,7 +459,7 @@ def _jinja2_filter_sanitize_tag_class(tag_title):
     return sanitized if sanitized else 'tag'
 
 # Import login_optionally_required from auth_decorator
-from changedetectionio.auth_decorator import login_optionally_required
+from changedetectionio.auth_decorator import SHARED_DIFF_READ_ONLY_ENDPOINTS, login_optionally_required
 
 # When nobody is logged in Flask-Login's current_user is set to an AnonymousUser object.
 class User(flask_login.UserMixin):
@@ -456,6 +506,32 @@ class User(flask_login.UserMixin):
     pass
 
 
+def clean_startup_state(datastore):
+    """One-shot validation/repair of persisted settings at app startup.
+
+    Runs once when the app boots (after the datastore is loaded and fetchers are registered).
+    Keeps stale/invalid persisted config from silently breaking runtime behaviour. Add further
+    startup repairs here as needed.
+    """
+    # If the global default fetch method points at a fetcher that is no longer available
+    # (e.g. a browser plugin like 'cloakbrowser' that was set as default and then uninstalled),
+    # fall back to 'html_requests'. Otherwise the settings UI shows no selected default and
+    # watches set to "System settings default" silently resolve to requests at fetch time
+    # (and break for browser-steps watches).
+    try:
+        from changedetectionio import content_fetchers
+        valid_fetchers = {name for name, _desc in content_fetchers.available_fetchers()}
+        cur_default = datastore.data['settings']['application'].get('fetch_backend')
+        if cur_default and cur_default != 'system' and cur_default not in valid_fetchers:
+            logger.warning(
+                f"Configured default fetch_backend '{cur_default}' is not an available fetcher "
+                f"(plugin uninstalled?) - resetting default to 'html_requests'."
+            )
+            datastore.data['settings']['application']['fetch_backend'] = 'html_requests'
+    except Exception as e:
+        logger.error(f"clean_startup_state: could not validate default fetch_backend: {e}")
+
+
 def changedetection_app(config=None, datastore_o=None):
     logger.trace("TRACE log is enabled")
 
@@ -464,6 +540,9 @@ def changedetection_app(config=None, datastore_o=None):
 
     # Set datastore reference in notification queue for all_muted checking
     notification_q.set_datastore(datastore)
+
+    # One-shot validation/repair of persisted settings that may have gone stale between runs.
+    clean_startup_state(datastore)
 
     # Import and create a wrapper for is_safe_url that has access to app
     from changedetectionio.is_safe_url import is_safe_url as _is_safe_url
@@ -517,6 +596,11 @@ def changedetection_app(config=None, datastore_o=None):
         available_languages=available_languages
     )
 
+    @app.context_processor
+    def inject_llm_features_disabled():
+        from changedetectionio.llm.evaluator import is_llm_features_disabled
+        return dict(llm_features_disabled=is_llm_features_disabled())
+
     # Set up a request hook to check authentication for all routes
     @app.before_request
     def check_authentication():
@@ -536,14 +620,14 @@ def changedetection_app(config=None, datastore_o=None):
             # Permitted
             elif request.endpoint and 'login' in request.endpoint:
                 return None
-            elif request.endpoint and 'diff_history_page' in request.endpoint and datastore.data['settings']['application'].get('shared_diff_access'):
+            elif request.endpoint in SHARED_DIFF_READ_ONLY_ENDPOINTS and datastore.data['settings']['application'].get('shared_diff_access'):
                 return None
             elif request.method in flask_login.config.EXEMPT_METHODS:
                 return None
             elif app.config.get('LOGIN_DISABLED'):
                 return None
             # RSS access with token is allowed
-            elif request.endpoint and 'rss.feed' in request.endpoint:
+            elif request.blueprint == 'rss':
                 return None
             # Socket.IO routes - need separate handling
             elif request.path.startswith('/socket.io/'):
@@ -779,7 +863,11 @@ def changedetection_app(config=None, datastore_o=None):
             if favicon_filename:
                 # Use cached MIME type detection
                 filepath = os.path.join(watch.data_dir, favicon_filename)
+
                 mime = get_favicon_mime_type(filepath)
+                if 'text' in mime:
+                    logger.debug(f"Aborting favicon request for {filename} because mimetype might be text (bad mimetype) '{mime}'")
+                    abort(404)
 
                 response = make_response(send_from_directory(watch.data_dir, favicon_filename))
                 response.headers['Content-type'] = mime
@@ -852,6 +940,9 @@ def changedetection_app(config=None, datastore_o=None):
 
     from changedetectionio.blueprint.imports import construct_blueprint as construct_import_blueprint
     app.register_blueprint(construct_import_blueprint(datastore, update_q, queuedWatchMetaData), url_prefix='/imports')
+
+    from changedetectionio.blueprint.add_watch_ui import construct_blueprint as construct_add_watch_ui_blueprint
+    app.register_blueprint(construct_add_watch_ui_blueprint(datastore), url_prefix='/add-watch-ui')
 
     import changedetectionio.blueprint.price_data_follower as price_data_follower
     app.register_blueprint(price_data_follower.construct_blueprint(datastore, update_q), url_prefix='/price_data_follower')
@@ -975,6 +1066,11 @@ def changedetection_app(config=None, datastore_o=None):
                     "queue_size": update_q.qsize(),
                     "queued_data": all_queued
                 })
+
+    if strtobool(os.getenv('HISTORY_SNAPSHOT_FILE_ALLOW_OUTSIDE_WATCH_DATADIR', 'False')):
+        logger.warning("SECURITY WARNING: HISTORY_SNAPSHOT_FILE_ALLOW_OUTSIDE_WATCH_DATADIR is enabled — "
+                       "snapshot reads are NOT confined to the watch data directory. "
+                       "This disables protection against path traversal via restored backups (GHSA-8757-69j2-hx56).")
 
     # Start the async workers during app initialization
     # Can be overridden by ENV or use the default settings
@@ -1246,10 +1342,10 @@ def ticker_thread_check_time_launch_checks():
                     if queued_successfully:
                         logger.debug(
                             f"> Queued watch UUID {uuid} "
-                            f"last checked at {watch['last_checked']} "
+                            f"Checked at {watch['last_checked']} "
                             f"queued at {now:0.2f} priority {priority} "
                             f"jitter {watch.jitter_seconds:0.2f}s, "
-                            f"{now - watch['last_checked']:0.2f}s since last checked")
+                            f"{now - watch['last_checked']:0.2f}s since Checked")
                     else:
                         logger.critical(f"CRITICAL: Failed to queue watch UUID {uuid} in ticker thread!")
                         

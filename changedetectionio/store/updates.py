@@ -25,7 +25,7 @@ except ImportError:
     HAS_ORJSON = False
 
 from ..html_tools import TRANSLATE_WHITESPACE_TABLE
-from ..processors.restock_diff import Restock
+from ..processors.restock_diff import Restock, get_price_from_history_str
 from ..blueprint.rss import RSS_CONTENT_FORMAT_DEFAULT
 from ..model import USE_SYSTEM_DEFAULT_NOTIFICATION_FORMAT_FOR_WATCH
 
@@ -774,4 +774,101 @@ class DatastoreUpdatesMixin:
             del tag['restock_settings']
             tag.commit()
             logger.info(f"update_30: migrated tag {tag_uuid} restock_settings → processor_config_restock_diff")
+
+    def update_31(self):
+        """Fold any flat application.llm_* key into nested application.llm.<stripped>.
+
+        Before: a handful of LLM settings (llm_enabled, llm_thinking_budget, …) lived
+        directly on settings.application alongside everything else, while the provider
+        config (model, api_key, …) was already nested under settings.application.llm.
+        Unifies them under one parent so the LLMSettings pydantic model has a single
+        home to read/write.
+
+        Flat key wins on conflict (most-recent form-saved value). Idempotent.
+        """
+        application = self.data['settings']['application']
+        present = [k for k in list(application) if k.startswith('llm_')]
+        if not present:
+            return
+
+        nested = application.get('llm') or {}
+        for flat in present:
+            nested[flat.removeprefix('llm_')] = application.pop(flat)
+        application['llm'] = nested
+        logger.info(f"update_31: folded {len(present)} flat llm_* keys into application.llm.* "
+                    f"({', '.join(present)})")
+
+    def update_32(self):
+        """Drop max_tokens_per_check and rename max_tokens_cumulative → max_tokens_per_count_period.
+
+        max_tokens_per_check was never reachable from the UI (form field declared but
+        never rendered or saved) and overlapped with the cumulative cap. Removing it.
+
+        max_tokens_cumulative was misleading — the field was used as a per-watch
+        per-period cap, not lifetime. Renamed so the semantic is clear and so a
+        future configurable period (day/week/month) doesn't force another rename.
+
+        Both keys are unreached from real installs (no UI path on prior releases);
+        this migration is mostly for branches and devs running pre-release commits.
+        """
+        llm = self.data['settings']['application'].get('llm') or {}
+        if not llm:
+            return
+        changed = False
+        if 'max_tokens_per_check' in llm:
+            del llm['max_tokens_per_check']
+            changed = True
+        if 'max_tokens_cumulative' in llm:
+            llm.setdefault('max_tokens_per_count_period', llm.pop('max_tokens_cumulative'))
+            changed = True
+        if changed:
+            self.data['settings']['application']['llm'] = llm
+            logger.info("update_32: cleaned up obsolete max_tokens_per_check / renamed max_tokens_cumulative")
+
+    def update_33(self):
+        """Restock: consolidate the old price-history fields into a single 'last_price'.
+
+        Earlier schemas carried 'original_price' (misnamed - it was re-stamped with the current
+        price every check, so it actually held the previous check's price) and, on the UI branch,
+        'prev_price' (price before the last change, for the watch-list arrow). Both are replaced by
+        'last_price' = the price at the previous check, which now drives BOTH the % threshold and
+        the up/down arrow (get_price_change_percent), with no history reads at render time.
+
+        Backfill last_price from the second-to-last history snapshot so the arrow is correct
+        immediately; fall back to the old original_price; then drop the obsolete keys. Idempotent.
+
+        """
+        migrated = 0
+        for uuid, watch in self.data['watching'].items():
+            if watch.get('processor') != 'restock_diff':
+                continue
+            restock = watch.get('restock')
+            if not isinstance(restock, dict):
+                continue
+
+            # Best-effort backfill of last_price = previous price (second-to-last history snapshot)
+            try:
+                versions = list(watch.history.keys())
+            except Exception:
+                versions = []
+
+            if len(versions) >= 1 and not restock.get('price'):
+                snapshot = watch.get_history_snapshot(timestamp=versions[-1])
+                restock['price'] = get_price_from_history_str(history_str=snapshot)
+                logger.trace(f"UUID {uuid} restock current price set to '{restock['last_price']}'")
+
+            if len(versions) >= 2:
+                snapshot = watch.get_history_snapshot(timestamp=versions[-2])
+                if snapshot:
+                    restock['last_price'] = get_price_from_history_str(history_str=snapshot)
+                    logger.trace(f"UUID {uuid} restock last_price set to '{restock['last_price']}'")
+
+            # Fall back to the old preserved value if history gave us nothing
+            if not restock.get('last_price') and restock.get('original_price') is not None:
+                restock['last_price'] = restock.get('original_price')
+
+            restock.pop('original_price', None)
+            restock.pop('prev_price', None)
+            watch.commit()
+
 

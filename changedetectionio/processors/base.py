@@ -5,7 +5,7 @@ import hashlib
 from changedetectionio.browser_steps.browser_steps import browser_steps_get_valid_steps
 from changedetectionio.content_fetchers.base import Fetcher
 from changedetectionio.strtobool import strtobool
-from changedetectionio.validate_url import is_private_hostname
+from changedetectionio.validate_url import is_private_hostname, is_url_private_or_parser_confused
 from copy import deepcopy
 from abc import abstractmethod
 import os
@@ -97,7 +97,6 @@ class difference_detection_processor():
             logger.warning(f"Failed to read checksum file for {self.watch_uuid}: {e}")
             self.last_raw_content_checksum = None
 
-
     async def validate_iana_url(self):
         """Pre-flight SSRF check — runs DNS lookup in executor to avoid blocking the event loop.
         Covers all fetchers (requests, playwright, puppeteer, plugins) since every fetch goes
@@ -105,15 +104,73 @@ class difference_detection_processor():
         """
         if strtobool(os.getenv('ALLOW_IANA_RESTRICTED_ADDRESSES', 'false')):
             return
-        parsed = urlparse(self.watch.link)
-        if not parsed.hostname:
-            return
         loop = asyncio.get_running_loop()
-        if await loop.run_in_executor(None, is_private_hostname, parsed.hostname):
+        # Use the parser-agnostic check so urlparse/urllib3 differentials (GHSA-rph4-96w6-q594)
+        # can't slip a private/internal hostname past this pre-flight gate.
+        if await loop.run_in_executor(None, is_url_private_or_parser_confused, self.watch.link):
             raise Exception(
-                f"Fetch blocked: '{self.watch.link}' resolves to a private/reserved IP address. "
+                f"Fetch blocked: '{self.watch.link}' resolves to a private/reserved IP address "
+                f"or contains a parser-differential payload. "
                 f"Set ALLOW_IANA_RESTRICTED_ADDRESSES=true to allow."
             )
+
+    def _consume_preloaded_fetch(self):
+        """One-shot: if the Add Watch page parked a freshly-fetched snapshot for this
+        watch (html + screenshot + xpath, see add_watch_ui/snapshot), populate self.fetcher
+        from it instead of hitting the network. The marker file is deleted after use so
+        every subsequent check fetches live.
+
+        Returns True if a preload was consumed (caller should skip the network fetch).
+        """
+        import json, zlib
+
+        data_dir = self.watch.data_dir
+        if not data_dir:
+            return False
+
+        preload_path = os.path.join(data_dir, 'preload-fetch.json')
+        if not os.path.isfile(preload_path):
+            return False
+
+        try:
+            with open(preload_path, 'r', encoding='utf-8') as f:
+                meta = json.load(f)
+        except Exception as e:
+            logger.warning(f"Could not read preloaded fetch for {self.watch.get('uuid')}: {e}")
+            try:
+                os.unlink(preload_path)
+            except OSError:
+                pass
+            return False
+
+        # Always delete first - this is one-shot regardless of what happens next.
+        try:
+            os.unlink(preload_path)
+        except OSError:
+            pass
+
+        content = meta.get('content')
+        self.fetcher.content = content
+        self.fetcher.raw_content = content.encode('utf-8', errors='replace') if isinstance(content, str) else content
+        self.fetcher.status_code = meta.get('status_code', 200)
+        self.fetcher.headers = meta.get('headers') or {'content-type': 'text/html'}
+
+        # Screenshot + xpath were migrated alongside in final on-disk format - reuse them.
+        screenshot_path = os.path.join(data_dir, 'last-screenshot.png')
+        if os.path.isfile(screenshot_path):
+            with open(screenshot_path, 'rb') as f:
+                self.fetcher.screenshot = f.read()
+
+        elements_path = os.path.join(data_dir, 'elements.deflate')
+        if os.path.isfile(elements_path):
+            try:
+                with open(elements_path, 'rb') as f:
+                    self.fetcher.xpath_data = json.loads(zlib.decompress(f.read()))
+            except Exception as e:
+                logger.warning(f"Could not load preloaded xpath data for {self.watch.get('uuid')}: {e}")
+
+        logger.info(f"Using preloaded Add-Watch snapshot for {self.watch.get('uuid')} - skipping network fetch")
+        return True
 
     async def call_browser(self, preferred_proxy_id=None):
 
@@ -130,49 +187,16 @@ class difference_detection_processor():
 
         await self.validate_iana_url()
 
-        # Requests, playwright, other browser via wss:// etc, fetch_extra_something
-        prefer_fetch_backend = self.watch.get('fetch_backend', 'system')
-
         # Proxy ID "key"
         preferred_proxy_id = preferred_proxy_id if preferred_proxy_id else self.datastore.get_preferred_proxy_for_watch(
             uuid=self.watch.get('uuid'))
 
-        # Pluggable content self.fetcher
-        if not prefer_fetch_backend or prefer_fetch_backend == 'system':
-            prefer_fetch_backend = self.datastore.data['settings']['application'].get('fetch_backend')
-
-        # In the case that the preferred fetcher was a browser config with custom connection URL..
-        # @todo - on save watch, if its extra_browser_ then it should be obvious it will use playwright (like if its requests now..)
-        custom_browser_connection_url = None
-        if prefer_fetch_backend.startswith('extra_browser_'):
-            (t, key) = prefer_fetch_backend.split('extra_browser_')
-            connection = list(
-                filter(lambda s: (s['browser_name'] == key), self.datastore.data['settings']['requests'].get('extra_browsers', [])))
-            if connection:
-                prefer_fetch_backend = 'html_webdriver'
-                custom_browser_connection_url = connection[0].get('browser_connection_url')
-
-        # PDF should be html_requests because playwright will serve it up (so far) in a embedded page
-        # @todo https://github.com/dgtlmoon/changedetection.io/issues/2019
-        # @todo needs test to or a fix
-        if self.watch.is_pdf:
-            prefer_fetch_backend = "html_requests"
-
-        # Grab the right kind of 'fetcher', (playwright, requests, etc)
-        from changedetectionio import content_fetchers
-        if hasattr(content_fetchers, prefer_fetch_backend):
-            # @todo TEMPORARY HACK - SWITCH BACK TO PLAYWRIGHT FOR BROWSERSTEPS
-            if prefer_fetch_backend == 'html_webdriver' and self.watch.has_browser_steps:
-                # This is never supported in selenium anyway
-                logger.warning(
-                    "Using playwright fetcher override for possible puppeteer request in browsersteps, because puppetteer:browser steps is incomplete.")
-                from changedetectionio.content_fetchers.playwright import fetcher as playwright_fetcher
-                fetcher_obj = playwright_fetcher
-            else:
-                fetcher_obj = getattr(content_fetchers, prefer_fetch_backend)
-        else:
-            # What it referenced doesnt exist, Just use a default
-            fetcher_obj = getattr(content_fetchers, "html_requests")
+        # Resolve which content fetcher this watch should use. This is the single source of
+        # truth (watch -> group -> system, extra_browser_/pdf/browser_steps overrides etc);
+        # the resolved backend name is stamped onto the fetcher instance below.
+        from changedetectionio.content_fetchers import resolve_content_fetcher
+        fetcher_obj, prefer_fetch_backend, custom_browser_connection_url = resolve_content_fetcher(
+            watch=self.watch, datastore=self.datastore)
 
         proxy_url = None
         if preferred_proxy_id:
@@ -191,6 +215,10 @@ class difference_detection_processor():
                                    custom_browser_connection_url=custom_browser_connection_url,
                                    screenshot_format=self.screenshot_format
                                    )
+
+        # Stamp the resolved backend name so downstream consumers (processors, plugins)
+        # can read it directly instead of re-deriving it from the fetcher class name.
+        self.fetcher.backend_name = prefer_fetch_backend
 
         if self.watch.has_browser_steps:
             self.fetcher.browser_steps = browser_steps_get_valid_steps(self.watch.get('browser_steps', []))

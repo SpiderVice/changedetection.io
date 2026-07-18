@@ -21,7 +21,7 @@ jobs:
     env:
       PYTHON_VERSION: ${{ inputs.python-version }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Set up Python ${{ env.PYTHON_VERSION }}
         uses: actions/setup-python@v6
@@ -29,7 +29,7 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
 
       - name: Cache pip packages
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: ~/.cache/pip
           key: ${{ runner.os }}-pip-py${{ env.PYTHON_VERSION }}-${{ hashFiles('requirements.txt') }}
@@ -85,7 +85,7 @@ jobs:
     env:
       PYTHON_VERSION: ${{ inputs.python-version }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Download Docker image artifact
         uses: actions/download-artifact@v8
@@ -99,11 +99,7 @@ jobs:
 
       - name: Run Unit Tests
         run: |
-          docker run test-changedetectionio bash -c 'python3 -m unittest changedetectionio.tests.unit.test_notification_diff'
-          docker run test-changedetectionio bash -c 'python3 -m unittest changedetectionio.tests.unit.test_watch_model'
-          docker run test-changedetectionio bash -c 'python3 -m unittest changedetectionio.tests.unit.test_jinja2_security'
-          docker run test-changedetectionio bash -c 'python3 -m unittest changedetectionio.tests.unit.test_semver'
-          docker run test-changedetectionio bash -c 'python3 -m unittest changedetectionio.tests.unit.test_html_to_text'         
+          docker run test-changedetectionio bash -c 'cd changedetectionio;pytest tests/unit/ tests/llm/'
 
   # Basic pytest tests with ancillary services
   basic-tests:
@@ -113,7 +109,7 @@ jobs:
     env:
       PYTHON_VERSION: ${{ inputs.python-version }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Download Docker image artifact
         uses: actions/download-artifact@v8
@@ -185,7 +181,7 @@ jobs:
     env:
       PYTHON_VERSION: ${{ inputs.python-version }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Download Docker image artifact
         uses: actions/download-artifact@v8
@@ -227,7 +223,7 @@ jobs:
     env:
       PYTHON_VERSION: ${{ inputs.python-version }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Download Docker image artifact
         uses: actions/download-artifact@v8
@@ -267,7 +263,7 @@ jobs:
     env:
       PYTHON_VERSION: ${{ inputs.python-version }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Download Docker image artifact
         uses: actions/download-artifact@v8
@@ -303,7 +299,7 @@ jobs:
     env:
       PYTHON_VERSION: ${{ inputs.python-version }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Download Docker image artifact
         uses: actions/download-artifact@v8
@@ -331,7 +327,7 @@ jobs:
     env:
       PYTHON_VERSION: ${{ inputs.python-version }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Download Docker image artifact
         uses: actions/download-artifact@v8
@@ -501,7 +497,7 @@ jobs:
     env:
       PYTHON_VERSION: ${{ inputs.python-version }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Download Docker image artifact
         uses: actions/download-artifact@v8
@@ -541,7 +537,7 @@ jobs:
     env:
       PYTHON_VERSION: ${{ inputs.python-version }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Download Docker image artifact
         uses: actions/download-artifact@v8
@@ -571,7 +567,7 @@ jobs:
     env:
       PYTHON_VERSION: ${{ inputs.python-version }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Download Docker image artifact
         uses: actions/download-artifact@v8
@@ -587,6 +583,10 @@ jobs:
         run: |
           docker run  -e EXTRA_PACKAGES=changedetection.io-osint-processor test-changedetectionio bash -c 'cd changedetectionio;pytest -vvv -s  tests/plugins/test_processor.py::test_check_plugin_processor'
 
+      - name: Plugin get_html_head_extras hook injects into base.html
+        run: |
+          docker run test-changedetectionio bash -c 'cd changedetectionio;pytest -vvv -s tests/plugins/test_html_head_extras.py'
+
   # Container startup tests
   container-tests:
     runs-on: ubuntu-latest
@@ -595,7 +595,7 @@ jobs:
     env:
       PYTHON_VERSION: ${{ inputs.python-version }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Download Docker image artifact
         uses: actions/download-artifact@v8
@@ -640,7 +640,7 @@ jobs:
     env:
       PYTHON_VERSION: ${{ inputs.python-version }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Download Docker image artifact
         uses: actions/download-artifact@v8
@@ -694,7 +694,7 @@ jobs:
     env:
       PYTHON_VERSION: ${{ inputs.python-version }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0  # Fetch all history and tags for upgrade testing
 

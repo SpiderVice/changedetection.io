@@ -16,6 +16,51 @@ except ModuleNotFoundError:
 
 
 
+def test_jsonp_treated_as_plaintext():
+    from ..processors.magic import guess_stream_type
+
+    # JSONP content (server wrongly claims application/json) should be detected as plaintext
+    # Callback names are arbitrary identifiers, not always 'cb'
+    jsonp_content = 'jQuery123456({ "version": "8.0.41", "url": "https://example.com/app.apk" })'
+    result = guess_stream_type(http_content_header="application/json", content=jsonp_content)
+    assert result.is_json is False
+    assert result.is_plaintext is True
+
+    # Variation with dotted callback name e.g. jQuery.cb(...)
+    jsonp_dotted = 'some.callback({ "version": "1.0" })'
+    result = guess_stream_type(http_content_header="application/json", content=jsonp_dotted)
+    assert result.is_json is False
+    assert result.is_plaintext is True
+
+    # Real JSON should still be detected as JSON
+    json_content = '{ "version": "8.0.41", "url": "https://example.com/app.apk" }'
+    result = guess_stream_type(http_content_header="application/json", content=json_content)
+    assert result.is_json is True
+    assert result.is_plaintext is False
+
+
+def test_jsonp_json_filter_extraction():
+    from .. import html_tools
+
+    # Tough case: dotted namespace callback, trailing semicolon, deeply nested content with arrays
+    jsonp_content = 'weixin.update.callback({"platforms": {"android": {"variants": [{"arch": "arm64", "versionName": "8.0.68", "url": "https://example.com/app-arm64.apk"}, {"arch": "arm32", "versionName": "8.0.41", "url": "https://example.com/app-arm32.apk"}]}}});'
+
+    # Deep nested jsonpath filter into array element
+    text = html_tools.extract_json_as_string(jsonp_content, "json:$.platforms.android.variants[0].versionName")
+    assert text == '"8.0.68"'
+
+    # Filter that selects the second array element
+    text = html_tools.extract_json_as_string(jsonp_content, "json:$.platforms.android.variants[1].arch")
+    assert text == '"arm32"'
+
+    if jq_support:
+        text = html_tools.extract_json_as_string(jsonp_content, "jq:.platforms.android.variants[0].versionName")
+        assert text == '"8.0.68"'
+
+        text = html_tools.extract_json_as_string(jsonp_content, "jqraw:.platforms.android.variants[1].url")
+        assert text == "https://example.com/app-arm32.apk"
+
+
 def test_unittest_inline_html_extract():
     # So lets pretend that the JSON we want is inside some HTML
     content="""
@@ -451,8 +496,39 @@ def test_correct_header_detect(client, live_server, measure_memory_usage, datast
     keys = list(data.keys())
     # Should be correctly formatted and sorted,  ("world" goes to end)
     assert keys == ["hello", "world"]
-        
+
     delete_all_watches(client)
+
+
+def test_content_type_json_with_unparsable_body(client, live_server, measure_memory_usage, datastore_path):
+    # Re https://github.com/dgtlmoon/changedetection.io/issues/3827
+    # Some servers send "Content-Type: application/json" but the body is NOT actually JSON
+    # (for example GWT-RPC responses which start with "//OK[...]").
+    # Previously this raised "No parsable JSON found in this document" and errored the whole
+    # watch, so nothing could be viewed or diffed. Instead the raw content should be kept.
+    gwt_rpc_body = '//OK[3,1,["com.example.User/123","Alice Smith","alice@example.com"],0,7]'
+    with open(os.path.join(datastore_path, "endpoint-content.txt"), "w") as f:
+        f.write(gwt_rpc_body)
+
+    test_url = url_for('test_endpoint', content_type="application/json", _external=True)
+    uuid = client.application.config.get('DATASTORE').add_watch(url=test_url)
+    client.get(url_for("ui.form_watch_checknow"), follow_redirects=True)
+    wait_for_all_checks(client)
+
+    # The watch should not be left in an error state complaining about JSON parsing
+    res = client.get(url_for("watchlist.index"))
+    assert b'No parsable JSON found in this document' not in res.data
+
+    # A snapshot should have been stored (not skipped due to an exception), and it should
+    # contain the raw, unparsable "JSON" content so it can still be viewed/diffed.
+    watch = live_server.app.config['DATASTORE'].data['watching'][uuid]
+    dates = list(watch.history.keys())
+    assert len(dates) >= 1
+    snapshot_contents = watch.get_history_snapshot(timestamp=dates[0])
+    assert 'com.example.User' in snapshot_contents
+
+    delete_all_watches(client)
+
 
 def test_check_jsonpath_ext_filter(client, live_server, measure_memory_usage, datastore_path):
     check_json_ext_filter('json:$[?(@.status==Sold)]', client, live_server, datastore_path=datastore_path)

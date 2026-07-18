@@ -61,7 +61,7 @@ class ChangeDetectionSpec:
         pass
 
     @hookspec
-    def get_itemprop_availability_override(self, content, fetcher_name, fetcher_instance, url):
+    def get_itemprop_availability_override(self, content, fetcher_name, fetcher_instance, url, llm_intent=None):
         """Provide custom implementation of get_itemprop_availability for a specific fetcher.
 
         This hook allows plugins to provide their own product availability detection
@@ -73,6 +73,7 @@ class ChangeDetectionSpec:
             fetcher_name: The name of the fetcher being used (e.g., 'html_js_zyte')
             fetcher_instance: The fetcher instance that generated the content
             url: The URL being watched/checked
+            llm_intent: Optional user-supplied intent string (e.g. "alert when price drops below $300")
 
         Returns:
             dict or None: Dictionary with availability data:
@@ -174,6 +175,64 @@ class ChangeDetectionSpec:
         """
         pass
 
+    @hookspec
+    def get_html_head_extras():
+        """Return HTML to inject into the <head> of every page via base.html.
+
+        Plugins can use this to add <script>, <style>, or <link> tags that should
+        be present on all pages.  Return a raw HTML string or None.
+
+        IMPORTANT: Always use Flask's url_for() for any src/href URLs so that
+        sub-path deployments (nginx reverse proxy with USE_X_SETTINGS / X-Forwarded-Prefix)
+        work correctly.  This hook is called inside a request context so url_for() is
+        always available.
+
+        For small amounts of CSS/JS, return them inline — no file-serving needed::
+
+            from changedetectionio.pluggy_interface import hookimpl
+
+            @hookimpl
+            def get_html_head_extras(self):
+                return (
+                    '<style>.my-module-banner { color: red; }</style>\\n'
+                    '<script>console.log("my_module_content loaded");</script>'
+                )
+
+        For larger assets, register your own lightweight Flask routes in the plugin
+        module and point to them with url_for() so the sub-path prefix is handled
+        automatically::
+
+            from flask import url_for, Response
+            from changedetectionio.pluggy_interface import hookimpl
+            from changedetectionio.flask_app import app as _app
+
+            MY_CSS = ".my-module-example { color: red; }"
+            MY_JS  = "console.log('my_module_content loaded');"
+
+            @_app.route('/my_module_content/css')
+            def my_module_content_css():
+                return Response(MY_CSS, mimetype='text/css',
+                                headers={'Cache-Control': 'max-age=3600'})
+
+            @_app.route('/my_module_content/js')
+            def my_module_content_js():
+                return Response(MY_JS, mimetype='application/javascript',
+                                headers={'Cache-Control': 'max-age=3600'})
+
+            @hookimpl
+            def get_html_head_extras(self):
+                css = url_for('my_module_content_css')
+                js  = url_for('my_module_content_js')
+                return (
+                    f'<link rel="stylesheet" href="{css}">\\n'
+                    f'<script src="{js}" defer></script>'
+                )
+
+        Returns:
+            str or None: Raw HTML string to inject inside <head>, or None
+        """
+        pass
+
 
 # Set up Plugin Manager
 plugin_manager = pluggy.PluginManager(PLUGIN_NAMESPACE)
@@ -183,24 +242,27 @@ plugin_manager.add_hookspecs(ChangeDetectionSpec)
 
 # Load plugins from subdirectories
 def load_plugins_from_directories():
-    # Dictionary of directories to scan for plugins
-    plugin_dirs = {
-        'conditions': os.path.join(os.path.dirname(__file__), 'conditions', 'plugins'),
-        # Add more plugin directories here as needed
-    }
-    
-    # Note: Removed the direct import of example_word_count_plugin as it's now in the conditions/plugins directory
-    
-    for dir_name, dir_path in plugin_dirs.items():
+    # List of (python_package_prefix, filesystem_path) pairs to scan for plugins.
+    # NOTE: processors/restock_diff/plugins is intentionally excluded here — those
+    # plugins are registered via register_builtin_restock_plugins() to avoid the
+    # circular import: restock_diff/__init__.py → model.Watch → content_fetchers → pluggy_interface.
+    plugin_dirs = [
+        (
+            'changedetectionio.conditions.plugins',
+            os.path.join(os.path.dirname(__file__), 'conditions', 'plugins'),
+        ),
+    ]
+
+    for module_prefix, dir_path in plugin_dirs:
         if not os.path.exists(dir_path):
             continue
-            
+
         # Get all Python files (excluding __init__.py)
         for filename in os.listdir(dir_path):
             if filename.endswith(".py") and filename != "__init__.py":
                 module_name = filename[:-3]  # Remove .py extension
-                module_path = f"changedetectionio.{dir_name}.plugins.{module_name}"
-                
+                module_path = f"{module_prefix}.{module_name}"
+
                 try:
                     module = importlib.import_module(module_path)
                     # Register the plugin with pluggy
@@ -252,6 +314,24 @@ def register_builtin_fetchers():
     if hasattr(webdriver_selenium, 'webdriver_selenium_plugin'):
         plugin_manager.register(webdriver_selenium.webdriver_selenium_plugin, 'builtin_webdriver_selenium')
 
+
+def register_builtin_restock_plugins():
+    """Register built-in restock processor plugins after all imports are complete.
+
+    Called from content_fetchers/__init__.py alongside register_builtin_fetchers()
+    to avoid the circular import that occurs when loading via load_plugins_from_directories()
+    (restock_diff/__init__.py → model.Watch → content_fetchers → pluggy_interface).
+    """
+    import importlib
+    module_path = 'changedetectionio.processors.restock_diff.plugins.llm_restock'
+    try:
+        module = importlib.import_module(module_path)
+        if not plugin_manager.is_registered(module):
+            plugin_manager.register(module, 'llm_restock')
+            logger.debug("Registered built-in restock plugin: llm_restock")
+    except Exception as e:
+        logger.error(f"Failed to register llm_restock plugin: {e}")
+
 # Helper function to collect UI stats extras from all plugins
 def collect_ui_edit_stats_extras(watch):
     """Collect and combine HTML content from all plugins that implement ui_edit_stats_extras"""
@@ -288,7 +368,7 @@ def collect_fetcher_status_icons(fetcher_name):
 
     return None
 
-def get_itemprop_availability_from_plugin(content, fetcher_name, fetcher_instance, url):
+def get_itemprop_availability_from_plugin(content, fetcher_name, fetcher_instance, url, llm_intent=None):
     """Get itemprop availability data from plugins as a fallback.
 
     This is called when the built-in get_itemprop_availability doesn't find good data.
@@ -298,6 +378,7 @@ def get_itemprop_availability_from_plugin(content, fetcher_name, fetcher_instanc
         fetcher_name: The name of the fetcher being used (e.g., 'html_js_zyte')
         fetcher_instance: The fetcher instance that generated the content
         url: The URL being watched (watch.link - includes Jinja2 evaluation)
+        llm_intent: Optional user-supplied intent string passed through to plugins
 
     Returns:
         dict or None: Availability data dictionary from first matching plugin, or None
@@ -307,7 +388,8 @@ def get_itemprop_availability_from_plugin(content, fetcher_name, fetcher_instanc
         content=content,
         fetcher_name=fetcher_name,
         fetcher_instance=fetcher_instance,
-        url=url
+        url=url,
+        llm_intent=llm_intent,
     )
 
     # Return first non-None result with actual data
@@ -384,34 +466,21 @@ def get_fetcher_capabilities(watch, datastore):
     # Get the fetcher class
     from changedetectionio import content_fetchers
 
-    # Try to get from built-in fetchers first
+    # Try built-in fetchers first, then plugin-provided fetchers
+    fetcher_class = None
     if hasattr(content_fetchers, fetcher_name):
         fetcher_class = getattr(content_fetchers, fetcher_name)
-        return {
-            'supports_browser_steps': getattr(fetcher_class, 'supports_browser_steps', False),
-            'supports_screenshots': getattr(fetcher_class, 'supports_screenshots', False),
-            'supports_xpath_element_data': getattr(fetcher_class, 'supports_xpath_element_data', False)
-        }
+    else:
+        # Query all plugins for registered fetchers
+        for fetcher_registration in plugin_manager.hook.register_content_fetcher():
+            if fetcher_registration and fetcher_registration[0] == fetcher_name:
+                fetcher_class = fetcher_registration[1]
+                break
 
-    # Try to get from plugin-provided fetchers
-    # Query all plugins for registered fetchers
-    plugin_fetchers = plugin_manager.hook.register_content_fetcher()
-    for fetcher_registration in plugin_fetchers:
-        if fetcher_registration:
-            name, fetcher_class = fetcher_registration
-            if name == fetcher_name:
-                return {
-                    'supports_browser_steps': getattr(fetcher_class, 'supports_browser_steps', False),
-                    'supports_screenshots': getattr(fetcher_class, 'supports_screenshots', False),
-                    'supports_xpath_element_data': getattr(fetcher_class, 'supports_xpath_element_data', False)
-                }
-
-    # Default: no capabilities
-    return {
-        'supports_browser_steps': False,
-        'supports_screenshots': False,
-        'supports_xpath_element_data': False
-    }
+    # Log + build from the shared FetcherCapabilities model. Return a plain dict so
+    # callers (e.g. blueprint/ui/edit.py) can still add their own extra capability keys.
+    caps = content_fetchers._log_fetcher_capabilities(fetcher_class, fetcher_name, uuid=watch.get('uuid'))
+    return caps.model_dump()
 
 
 def get_plugin_settings_tabs():
@@ -607,3 +676,19 @@ def apply_update_finalize(update_handler, watch, datastore, processing_exception
         # Don't let plugin errors crash the worker
         logger.error(f"Error in update_finalize hook: {e}")
         logger.exception(f"update_finalize hook exception details:")
+
+
+def collect_html_head_extras():
+    """Collect and combine HTML head extras from all plugins.
+
+    Called from a Flask template global so it always runs inside a request context.
+    This means url_for() works correctly in plugin implementations, including when the
+    app is deployed under a sub-path via USE_X_SETTINGS / X-Forwarded-Prefix (ProxyFix
+    sets SCRIPT_NAME so url_for() automatically prepends the prefix).
+
+    Returns:
+        str: Combined HTML string to inject inside <head>, or empty string
+    """
+    results = plugin_manager.hook.get_html_head_extras()
+    parts = [r for r in results if r]
+    return "\n".join(parts) if parts else ""

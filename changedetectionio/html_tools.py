@@ -4,6 +4,7 @@ from loguru import logger
 from typing import List
 import html
 import json
+import os
 import re
 
 # HTML added to be sure each result matching a filter (.example) gets converted to a new line by Inscriptis
@@ -13,6 +14,45 @@ PERL_STYLE_REGEX = r'^/(.*?)/([a-z]*)?$'
 
 TITLE_RE = re.compile(r"<title[^>]*>(.*?)</title>", re.I | re.S)
 META_CS  = re.compile(r'<meta[^>]+charset=["\']?\s*([a-z0-9_\-:+.]+)', re.I)
+
+# jq builtins that can leak sensitive data or cause harm when user-supplied expressions are executed.
+# env/$ENV reads all process environment variables (passwords, API keys, etc.)
+# include/import can read arbitrary files from disk
+# input/inputs reads beyond the supplied JSON data
+# debug/stderr leaks data to stderr
+# halt/halt_error terminates the process (DoS)
+_JQ_BLOCKED_PATTERNS = [
+    (re.compile(r'\benv\b'),                    'env (reads environment variables)'),
+    (re.compile(r'\$ENV\b'),                    '$ENV (reads environment variables)'),
+    (re.compile(r'\binclude\b'),                'include (reads files from disk)'),
+    (re.compile(r'\bimport\b'),                 'import (reads files from disk)'),
+    (re.compile(r'\binputs?\b'),                'input/inputs (reads beyond provided data)'),
+    (re.compile(r'\bdebug\b'),                  'debug (leaks data to stderr)'),
+    (re.compile(r'\bstderr\b'),                 'stderr (leaks data to stderr)'),
+    (re.compile(r'\bhalt(?:_error)?\b'),        'halt/halt_error (terminates the process)'),
+    (re.compile(r'\$__loc__\b'),                '$__loc__ (leaks file path information)'),
+    (re.compile(r'\bbuiltins\b'),               'builtins (enumerates available functions)'),
+    (re.compile(r'\bmodulemeta\b'),             'modulemeta (leaks module information)'),
+    (re.compile(r'\$JQ_BUILD_CONFIGURATION\b'), '$JQ_BUILD_CONFIGURATION (leaks build information)'),
+]
+
+def validate_jq_expression(expression: str) -> None:
+    """Raise ValueError if the jq expression uses any dangerous builtin.
+
+    User-supplied jq expressions are executed server-side. Without this check,
+    builtins like `env` expose every process environment variable (SALTED_PASS,
+    proxy credentials, API keys, etc.) as watch output.
+    """
+    from changedetectionio.strtobool import strtobool
+    if strtobool(os.getenv('JQ_ALLOW_RISKY_EXPRESSIONS', 'false')):
+        return
+
+    for pattern, description in _JQ_BLOCKED_PATTERNS:
+        if pattern.search(expression):
+            msg = f"jq expression uses disallowed builtin: {description}"
+            logger.critical(f"Security: blocked jq expression containing '{description}' - expression: {expression!r}")
+            raise ValueError(msg)
+
 META_CT  = re.compile(r'<meta[^>]+http-equiv=["\']?content-type["\']?[^>]*content=["\'][^>]*charset=([a-z0-9_\-:+.]+)', re.I)
 
 # 'price' , 'lowPrice', 'highPrice' are usually under here
@@ -30,6 +70,12 @@ _DEFAULT_UNSAFE_XPATH3_FUNCTIONS = [
     'unparsed-text-available',
     'doc',
     'doc-available',
+    'json-doc',
+    'json-doc-available',
+    'collection',           # XPath 2.0+: loads XML node collections from arbitrary URIs
+    'uri-collection',       # XPath 3.0+: enumerates URIs from resource collections
+    'transform',            # XPath 3.1: XSLT transformation (currently raises, block proactively)
+    'load-xquery-module',   # XPath 3.1: loads XQuery modules (currently raises, block proactively)
     'environment-variable',
     'available-environment-variables',
 ]
@@ -236,7 +282,7 @@ def xpath_filter(xpath_filter, html_content, append_pretty_line_formatting=False
     try:
         if is_xml:
             # So that we can keep CDATA for cdata_in_document_to_text() to process
-            parser = etree.XMLParser(strip_cdata=False)
+            parser = etree.XMLParser(strip_cdata=False, resolve_entities=False, no_network=True)
             # For XML/RSS content, use etree.fromstring to properly handle XML declarations
             tree = etree.fromstring(html_content.encode('utf-8') if isinstance(html_content, str) else html_content, parser=parser)
         else:
@@ -300,7 +346,7 @@ def xpath1_filter(xpath_filter, html_content, append_pretty_line_formatting=Fals
     try:
         if is_xml:
             # So that we can keep CDATA for cdata_in_document_to_text() to process
-            parser = etree.XMLParser(strip_cdata=False)
+            parser = etree.XMLParser(strip_cdata=False, resolve_entities=False, no_network=True)
             # For XML/RSS content, use etree.fromstring to properly handle XML declarations
             tree = etree.fromstring(html_content.encode('utf-8') if isinstance(html_content, str) else html_content, parser=parser)
         else:
@@ -378,12 +424,16 @@ def _parse_json(json_data, json_filter):
             raise Exception("jq not support not found")
 
         if json_filter.startswith("jq:"):
-            jq_expression = jq.compile(json_filter.removeprefix("jq:"))
+            expr = json_filter.removeprefix("jq:")
+            validate_jq_expression(expr)
+            jq_expression = jq.compile(expr)
             match = jq_expression.input(json_data).all()
             return _get_stripped_text_from_json_match(match)
 
         if json_filter.startswith("jqraw:"):
-            jq_expression = jq.compile(json_filter.removeprefix("jqraw:"))
+            expr = json_filter.removeprefix("jqraw:")
+            validate_jq_expression(expr)
+            jq_expression = jq.compile(expr)
             match = jq_expression.input(json_data).all()
             return '\n'.join(str(item) for item in match)
 
@@ -487,13 +537,25 @@ def extract_json_as_string(content, json_filter, ensure_is_ldjson_info_type=None
         except json.JSONDecodeError as e:
             logger.warning(f"Error processing JSON {content[:20]}...{str(e)})")
     else:
-        # Probably something else, go fish inside for it
-        try:
-            stripped_text_from_html = extract_json_blob_from_html(content=content,
-                                                                  ensure_is_ldjson_info_type=ensure_is_ldjson_info_type,
-                                                                  json_filter=json_filter                                                                  )
-        except json.JSONDecodeError as e:
-            logger.warning(f"Error processing JSON while extracting JSON from HTML blob {content[:20]}...{str(e)})")
+        # Check for JSONP wrapper: someCallback({...}) or some.namespace({...})
+        # Server may claim application/json but actually return JSONP
+        jsonp_match = re.match(r'^\w[\w.]*\s*\((.+)\)\s*;?\s*$', content.lstrip("\ufeff").strip(), re.DOTALL)
+        if jsonp_match:
+            try:
+                inner = jsonp_match.group(1).strip()
+                logger.warning(f"Content looks like JSONP, attempting to extract inner JSON for filter '{json_filter}'")
+                stripped_text_from_html = _parse_json(json.loads(inner), json_filter)
+            except json.JSONDecodeError as e:
+                logger.warning(f"Error processing JSONP inner content {content[:20]}...{str(e)})")
+
+        if not stripped_text_from_html:
+            # Probably something else, go fish inside for it
+            try:
+                stripped_text_from_html = extract_json_blob_from_html(content=content,
+                                                                      ensure_is_ldjson_info_type=ensure_is_ldjson_info_type,
+                                                                      json_filter=json_filter)
+            except json.JSONDecodeError as e:
+                logger.warning(f"Error processing JSON while extracting JSON from HTML blob {content[:20]}...{str(e)})")
 
     if not stripped_text_from_html:
         # Re 265 - Just return an empty string when filter not found
@@ -695,16 +757,41 @@ def get_triggered_text(content, trigger_text):
 
 
 def extract_title(data: bytes | str, sniff_bytes: int = 2048, scan_chars: int = 8192) -> str | None:
+    """Extract the <title> from an HTML document.
+
+    Rather than decoding/scanning a fixed prefix of the whole document, we first
+    locate the raw ``<title`` marker and then decode only a small window around
+    it.  This handles pages (e.g. Amazon) where large ``<head>`` sections push
+    the title tag well past the old 8 192-character scan limit.
+    """
+    # Maximum bytes/chars to extract after (and including) the opening <title tag.
+    # The regex needs to see </title>, so the window must cover the full content.
+    # The return value is always capped at 2 000 chars; titles beyond that are
+    # rare but possible.  We read up to 128 KiB from the tag onwards to handle
+    # even pathological cases without scanning the whole document.
+    _TITLE_WINDOW = 131072
+
     try:
-        # Only decode/process the prefix we need for title extraction
         match data:
-            case bytes() if data.startswith((b"\xff\xfe", b"\xfe\xff")):
-                prefix = data[:scan_chars * 2].decode("utf-16", errors="replace")
             case bytes() if data.startswith((b"\xff\xfe\x00\x00", b"\x00\x00\xfe\xff")):
-                prefix = data[:scan_chars * 4].decode("utf-32", errors="replace")
+                # UTF-32: locate the tag in the raw bytes, then decode the window.
+                tag_pos = data.lower().find(b"<\x00\x00\x00t\x00\x00\x00")
+                if tag_pos == -1:
+                    return None
+                chunk = data[tag_pos: tag_pos + _TITLE_WINDOW * 4].decode("utf-32", errors="replace")
+                prefix = chunk
+            case bytes() if data.startswith((b"\xff\xfe", b"\xfe\xff")):
+                # UTF-16: simple byte-pair search is tricky; fall back to decoding
+                # a reasonable head chunk and let the regex do the rest.
+                prefix = data[: max(scan_chars * 2, _TITLE_WINDOW)].decode("utf-16", errors="replace")
             case bytes():
+                # UTF-8 / legacy 8-bit: find the tag cheaply in raw bytes.
+                tag_pos = data.lower().find(b"<title")
+                if tag_pos == -1:
+                    return None
+                raw_chunk = data[tag_pos: tag_pos + _TITLE_WINDOW]
                 try:
-                    prefix = data[:scan_chars].decode("utf-8")
+                    chunk = raw_chunk.decode("utf-8")
                 except UnicodeDecodeError:
                     try:
                         head = data[:sniff_bytes].decode("ascii", errors="ignore")
@@ -712,23 +799,27 @@ def extract_title(data: bytes | str, sniff_bytes: int = 2048, scan_chars: int = 
                             enc = m.group(1).lower()
                         else:
                             enc = "cp1252"
-                        prefix = data[:scan_chars * 2].decode(enc, errors="replace")
+                        chunk = raw_chunk.decode(enc, errors="replace")
                     except Exception as e:
                         logger.error(f"Title extraction encoding detection failed: {e}")
                         return None
+                prefix = chunk
             case str():
-                prefix = data[:scan_chars] if len(data) > scan_chars else data
+                tag_pos = data.lower().find("<title")
+                if tag_pos == -1:
+                    return None
+                prefix = data[tag_pos: tag_pos + _TITLE_WINDOW]
             case _:
                 logger.error(f"Title extraction received unsupported data type: {type(data)}")
                 return None
 
-        # Search only in the prefix
+        # Search only in the (now tag-anchored) prefix
         if m := TITLE_RE.search(prefix):
             title = html.unescape(" ".join(m.group(1).split())).strip()
             # Some safe limit
             return title[:2000]
         return None
-        
+
     except Exception as e:
         logger.error(f"Title extraction failed: {e}")
         return None

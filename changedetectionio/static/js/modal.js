@@ -3,6 +3,21 @@
  * Provides accessible, animated confirmation dialogs
  */
 
+// Escapes a string for safe insertion via innerHTML
+function _modalEscapeHTML(str) {
+  const div = document.createElement('div');
+  div.textContent = str;
+  return div.innerHTML;
+}
+
+// Translatable strings are injected by base.html into window.ModalDialogI18n so
+// Babel can extract them from the Jinja template. Fall back to English when a
+// key is missing (e.g. a page that renders modal.js without the bridge).
+function _modalT(key, fallback) {
+  const i18n = window.ModalDialogI18n || {};
+  return (key in i18n) ? i18n[key] : fallback;
+}
+
 const ModalDialog = {
   /**
    * Show a confirmation dialog
@@ -19,11 +34,11 @@ const ModalDialog = {
   confirm: function(options) {
     return new Promise((resolve) => {
       const defaults = {
-        title: 'Confirm Action',
-        message: 'Are you sure?',
+        title: _modalT('confirmTitle', 'Confirm Action'),
+        message: _modalT('confirmMessage', 'Are you sure?'),
         type: 'info',
-        confirmText: 'Confirm',
-        cancelText: 'Cancel',
+        confirmText: _modalT('confirm', 'Confirm'),
+        cancelText: _modalT('cancel', 'Cancel'),
         onConfirm: null,
         onCancel: null
       };
@@ -125,12 +140,13 @@ const ModalDialog = {
    * @param {Function} onConfirm - Callback when confirmed
    */
   confirmDelete: function(itemName, onConfirm) {
+    const safeName = _modalEscapeHTML(itemName);
     return this.confirm({
-      title: 'Delete ' + itemName + '?',
-      message: `<p>Are you sure you want to delete <strong>${itemName}</strong>?</p><p>This action cannot be undone.</p>`,
+      title: _modalT('deleteTitle', 'Delete %(name)s?').split('%(name)s').join(safeName),
+      message: _modalT('deleteMessage', '<p>Are you sure you want to delete <strong>%(name)s</strong>?</p><p>This action cannot be undone.</p>').split('%(name)s').join(safeName),
       type: 'danger',
-      confirmText: 'Delete',
-      cancelText: 'Cancel',
+      confirmText: _modalT('delete', 'Delete'),
+      cancelText: _modalT('cancel', 'Cancel'),
       onConfirm: onConfirm
     });
   },
@@ -141,12 +157,13 @@ const ModalDialog = {
    * @param {Function} onConfirm - Callback when confirmed
    */
   confirmUnlink: function(itemName, onConfirm) {
+    const safeName = _modalEscapeHTML(itemName);
     return this.confirm({
-      title: 'Unlink ' + itemName + '?',
-      message: `<p>Are you sure you want to unlink all watches from <strong>${itemName}</strong>?</p><p>The tag will be kept but watches will be removed from it.</p>`,
+      title: _modalT('unlinkTitle', 'Unlink %(name)s?').split('%(name)s').join(safeName),
+      message: _modalT('unlinkMessage', '<p>Are you sure you want to unlink all watches from <strong>%(name)s</strong>?</p><p>The tag will be kept but watches will be removed from it.</p>').split('%(name)s').join(safeName),
       type: 'warning',
-      confirmText: 'Unlink',
-      cancelText: 'Cancel',
+      confirmText: _modalT('unlink', 'Unlink'),
+      cancelText: _modalT('cancel', 'Cancel'),
       onConfirm: onConfirm
     });
   }
@@ -172,12 +189,36 @@ $(document).ready(function() {
     const url = $element.attr('href');
 
     const config = {
-      type: $element.data('confirm-type') || 'danger',
-      title: $element.data('confirm-title') || 'Confirm Action',
-      message: $element.data('confirm-message') || '<p>Are you sure you want to proceed?</p>',
-      confirmText: $element.data('confirm-button') || 'Confirm',
-      cancelText: $element.data('cancel-button') || 'Cancel',
+      type: $element.attr('data-confirm-type') || 'danger',
+      title: $element.attr('data-confirm-title') || _modalT('confirmTitle', 'Confirm Action'),
+      message: $element.attr('data-confirm-message') || _modalT('proceedMessage', '<p>Are you sure you want to proceed?</p>'),
+      confirmText: $element.attr('data-confirm-button') || _modalT('confirm', 'Confirm'),
+      cancelText: $element.attr('data-cancel-button') || _modalT('cancel', 'Cancel'),
       onConfirm: function() {
+        // data-method="POST" — build a body-level hidden form with the CSRF
+        // token and submit it. Avoids nested-form HTML invalidity when the
+        // anchor lives inside an outer <form> (e.g. settings tabs). The CSRF
+        // token comes from the global `csrftoken` set in base.html.
+        // GHSA-g36r-fm2p-87xm: anchors that mutate server state must not fire
+        // on a bare GET, since <img src=...> CSRF relies on GET firing.
+        const method = ($element.attr('data-method') || 'GET').toUpperCase();
+        if (method === 'POST') {
+          const form = document.createElement('form');
+          form.method = 'POST';
+          form.action = url;
+          form.style.display = 'none';
+          if (typeof csrftoken !== 'undefined' && csrftoken) {
+            const tok = document.createElement('input');
+            tok.type = 'hidden';
+            tok.name = 'csrf_token';
+            tok.value = csrftoken;
+            form.appendChild(tok);
+          }
+          document.body.appendChild(form);
+          form.submit();
+          return;
+        }
+
         // If it's a link, navigate to the URL
         if ($element.is('a')) {
           window.location.href = url;
